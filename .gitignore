@@ -11,5 +11,6 @@ frontend/*.tsbuildinfo
 
 # OS / Editor / Local Agent
 .agents/
+graphify-out/
 .DS_Store
 Thumbs.db
