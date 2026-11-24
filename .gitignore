@@ -1,0 +1,15 @@
+# Rust backend
+backend/target/
+backend/data/*.db
+backend/data/*.db-shm
+backend/data/*.db-wal
+
+# React frontend
+frontend/node_modules/
+frontend/dist/
+frontend/*.tsbuildinfo
+
+# OS / Editor / Local Agent
+.agents/
+.DS_Store
+Thumbs.db
