@@ -1,0 +1,27 @@
+services:
+  nota-digital:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: nota-digital:latest
+    container_name: nota-digital
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      PORT: "3000"
+      DATABASE_URL: "sqlite:///app/data/nota_digital.db?mode=rwc"
+      STATIC_DIR: "/app/static"
+      TZ: "Asia/Jakarta"
+      ADMIN_USERNAME: "${ADMIN_USERNAME:-admin}"
+      ADMIN_PASSWORD: "${ADMIN_PASSWORD:?Set ADMIN_PASSWORD before running docker compose}"
+      AUTH_MAX_FAILED_ATTEMPTS: "${AUTH_MAX_FAILED_ATTEMPTS:-5}"
+      AUTH_LOCKOUT_MINUTES: "${AUTH_LOCKOUT_MINUTES:-15}"
+      SESSION_TTL_HOURS: "${SESSION_TTL_HOURS:-12}"
+      COOKIE_SECURE: "${COOKIE_SECURE:-false}"
+      RUST_LOG: "nota_digital_backend=info,tower_http=info"
+    volumes:
+      - nota_digital_data:/app/data
+
+volumes:
+  nota_digital_data:

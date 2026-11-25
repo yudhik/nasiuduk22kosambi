@@ -1,38 +1,84 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
-  AlertTriangle,
-  Check,
+  BarChart3,
+  Clock,
   Download,
   History,
+  Lock,
+  Plus,
   RefreshCw,
   Save,
+  Trash2,
   TrendingUp,
-  X,
+  Wallet,
 } from 'lucide-react';
 import { api } from '../api/client';
-import type { DailyReportResponse, StockMovement } from '../types';
+import type { ToastMessage } from '../components/ToastContainer';
+import type {
+  AnalyticsPreset,
+  DailyReportResponse,
+  PerformanceAnalyticsResponse,
+  StockMovement,
+  StoreStatusResponse,
+} from '../types';
 import { formatRupiah, formatTime, todayLocalDate } from '../utils/format';
+
+interface DailyReportPageProps {
+  storeStatus: StoreStatusResponse | null;
+  onToast: (title: string, description?: string, tone?: ToastMessage['tone']) => void;
+}
 
 interface PhysicalDraft {
   physical: string;
   notes: string;
 }
 
-export function DailyReportPage() {
+type ReportTab = 'daily' | 'analytics';
+
+const EXPENSE_CATEGORIES = ['Bahan Baku', 'Gas / Listrik', 'Kemasan', 'Operasional', 'Lainnya'];
+
+function formatDurationSeconds(secs: number | null): string {
+  if (secs === null) return '—';
+  if (secs < 60) return `${secs} dtk`;
+  const mins = Math.floor(secs / 60);
+  const rem = secs % 60;
+  if (mins < 60) return rem > 0 ? `${mins} mnt ${rem} dtk` : `${mins} mnt`;
+  const hrs = Math.floor(mins / 60);
+  const remMins = mins % 60;
+  return `${hrs} jam ${remMins} mnt`;
+}
+
+export function DailyReportPage({ storeStatus, onToast }: DailyReportPageProps) {
+  const [tab, setTab] = useState<ReportTab>('daily');
+
+  // === Daily Report State ===
   const [date, setDate] = useState(todayLocalDate);
   const [report, setReport] = useState<DailyReportResponse | null>(null);
   const [movements, setMovements] = useState<StockMovement[]>([]);
   const [showMovements, setShowMovements] = useState(false);
   const [drafts, setDrafts] = useState<Record<number, PhysicalDraft>>({});
   const [dirty, setDirty] = useState(false);
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
+  const [loadingDaily, setLoadingDaily] = useState(true);
+  const [savingOpname, setSavingOpname] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
 
-  const loadReport = async () => {
+  // Daily Expense Form
+  const [expTitle, setExpTitle] = useState('');
+  const [expCategory, setExpCategory] = useState('Bahan Baku');
+  const [expAmount, setExpAmount] = useState('');
+  const [expNotes, setExpNotes] = useState('');
+  const [savingExp, setSavingExp] = useState(false);
+
+  // === Performance Analytics State ===
+  const [preset, setPreset] = useState<AnalyticsPreset>('7d');
+  const [customFrom, setCustomFrom] = useState(todayLocalDate);
+  const [customTo, setCustomTo] = useState(todayLocalDate);
+  const [analytics, setAnalytics] = useState<PerformanceAnalyticsResponse | null>(null);
+  const [loadingAnalytics, setLoadingAnalytics] = useState(false);
+
+  const loadDaily = useCallback(async () => {
     try {
-      setLoading(true);
+      setLoadingDaily(true);
       setError(null);
       const [rep, movs] = await Promise.all([
         api.getDailyReport(date),
@@ -43,7 +89,7 @@ export function DailyReportPage() {
 
       const initialDrafts: Record<number, PhysicalDraft> = {};
       for (const row of rep.stock_reconciliation) {
-        initialDrafts[row.menu_item_id] = {
+        initialDrafts[row.stock_item_id] = {
           physical: row.physical_stock === null ? '' : String(row.physical_stock),
           notes: row.notes ?? '',
         };
@@ -53,49 +99,100 @@ export function DailyReportPage() {
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Gagal memuat laporan harian');
     } finally {
-      setLoading(false);
+      setLoadingDaily(false);
+    }
+  }, [date]);
+
+  const loadAnalytics = useCallback(async () => {
+    try {
+      setLoadingAnalytics(true);
+      setError(null);
+      const data = await api.getPerformanceAnalytics(
+        preset,
+        preset === 'custom' ? customFrom : undefined,
+        preset === 'custom' ? customTo : undefined
+      );
+      setAnalytics(data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Gagal memuat analitik performa');
+    } finally {
+      setLoadingAnalytics(false);
+    }
+  }, [preset, customFrom, customTo]);
+
+  useEffect(() => {
+    if (tab === 'daily') {
+      void loadDaily();
+    } else {
+      void loadAnalytics();
+    }
+  }, [tab, loadDaily, loadAnalytics, storeStatus?.status]);
+
+  const isDayClosed = report?.store_status === 'CLOSED';
+
+  const handleAddExpense = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const amt = Number(expAmount);
+    if (!expTitle.trim() || Number.isNaN(amt) || amt <= 0) {
+      setError('Isi nama pengeluaran dan nominal lebih dari 0.');
+      return;
+    }
+    try {
+      setSavingExp(true);
+      setError(null);
+      await api.createExpense({
+        business_date: date,
+        title: expTitle.trim(),
+        category: expCategory,
+        amount: amt,
+        notes: expNotes.trim() || undefined,
+      });
+      setExpTitle('');
+      setExpAmount('');
+      setExpNotes('');
+      onToast('Pengeluaran tercatat', `${expTitle.trim()} • ${formatRupiah(amt)}`, 'success');
+      await loadDaily();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Gagal menambah pengeluaran');
+    } finally {
+      setSavingExp(false);
     }
   };
 
-  useEffect(() => {
-    void loadReport();
-  }, [date]);
-
-  const updateDraft = (menuId: number, patch: Partial<PhysicalDraft>) => {
-    setDrafts((prev) => ({
-      ...prev,
-      [menuId]: {
-        physical: prev[menuId]?.physical ?? '',
-        notes: prev[menuId]?.notes ?? '',
-        ...patch,
-      },
-    }));
-    setDirty(true);
+  const handleDeleteExpense = async (id: number, title: string) => {
+    if (!window.confirm(`Hapus pengeluaran "${title}"?`)) return;
+    try {
+      setError(null);
+      await api.deleteExpense(id);
+      onToast(`Pengeluaran "${title}" dihapus`, undefined, 'info');
+      await loadDaily();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Gagal menghapus pengeluaran');
+    }
   };
 
   const handleSavePhysicalStock = async () => {
     if (!report) return;
     try {
-      setSaving(true);
+      setSavingOpname(true);
       setError(null);
       const entries = report.stock_reconciliation.map((row) => {
-        const draft = drafts[row.menu_item_id];
+        const draft = drafts[row.stock_item_id];
         const raw = draft?.physical.trim() ?? '';
         return {
-          menu_item_id: row.menu_item_id,
+          stock_item_id: row.stock_item_id,
           physical_stock: raw === '' ? null : Number(raw),
           notes: draft?.notes ?? '',
         };
       });
-
       const updated = await api.updatePhysicalStock(date, entries);
       setReport(updated);
       setDirty(false);
-      setNotice('Hasil hitung stok fisik (opname akhir hari) berhasil disimpan.');
+      onToast('Opname stok fisik disimpan', undefined, 'success');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Gagal menyimpan opname stok');
     } finally {
-      setSaving(false);
+      setSavingOpname(false);
     }
   };
 
@@ -106,602 +203,825 @@ export function DailyReportPage() {
       case 'RESTOCK':
         return 'Restock';
       case 'ORDER_DEDUCT':
-        return 'Terjual';
+        return 'Terpakai';
       case 'ORDER_VOID_RESTORE':
         return 'Batal (Void)';
+      case 'CLOSE_RESET':
+        return 'Reset Tutup';
     }
   };
 
-  const renderVarianceBadge = (liveVariance: number | null) => {
-    if (liveVariance === null) {
-      return (
-        <span className="rounded-full bg-slate-100 px-2.5 py-0.5 text-[11px] font-semibold text-slate-500">
-          Belum diisi
-        </span>
-      );
-    }
-    if (liveVariance === 0) {
-      return (
-        <span className="rounded-full bg-emerald-100 px-2.5 py-0.5 text-xs font-bold text-emerald-800">
-          Cocok (0)
-        </span>
-      );
-    }
-    if (liveVariance < 0) {
-      return (
-        <span className="rounded-full bg-red-100 px-2.5 py-0.5 text-xs font-bold text-red-700">
-          Kurang ({liveVariance})
-        </span>
-      );
-    }
-    return (
-      <span className="rounded-full bg-blue-100 px-2.5 py-0.5 text-xs font-bold text-blue-700">
-        Lebih (+{liveVariance})
-      </span>
-    );
-  };
+  const maxTrendRev = Math.max(
+    1,
+    ...(analytics?.daily_trend.map((d) => Math.max(d.revenue, d.expenses)) ?? [1])
+  );
+  const maxPeakOrders = Math.max(1, ...(analytics?.peak_hours.map((p) => p.order_count) ?? [1]));
+  const maxWeekdayRev = Math.max(1, ...(analytics?.by_weekday.map((w) => w.revenue) ?? [1]));
 
   return (
-    <div className={`space-y-5 ${dirty ? 'pb-20 md:pb-0' : ''}`}>
-      {/* Header & Controls */}
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <h1 className="text-lg font-bold text-slate-900 sm:text-xl">
-            Laporan &amp; Rekonsiliasi Stok
-          </h1>
-          <p className="text-xs text-slate-500 sm:text-sm">
-            Total pendapatan semua nota dan pencocokan stok akhir hari secara otomatis.
-          </p>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <input
-            type="date"
-            value={date}
-            onChange={(e) => setDate(e.target.value)}
-            className="h-10 flex-1 rounded-xl border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-700 sm:flex-none"
-          />
+    <div className="space-y-4">
+      {/* Top Switcher */}
+      <div className="flex flex-wrap items-center justify-between gap-2.5">
+        <div className="inline-flex rounded-xl border border-brand-amber-soft bg-white p-1">
           <button
             type="button"
-            onClick={() => void loadReport()}
-            className="inline-flex h-10 items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-700 active:scale-95 hover:bg-slate-50"
-            aria-label="Muat Ulang"
+            onClick={() => setTab('daily')}
+            className={`inline-flex items-center gap-1.5 rounded-lg px-3.5 py-1.5 text-xs font-bold transition ${
+              tab === 'daily'
+                ? 'bg-brand-orange text-white'
+                : 'text-brand-brown/75 hover:bg-brand-cream'
+            }`}
           >
-            <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
-            <span className="hidden sm:inline">Muat Ulang</span>
+            <TrendingUp className="h-3.5 w-3.5" />
+            <span>Laporan Harian</span>
           </button>
-          <a
-            href={api.getCsvExportUrl(date)}
-            download
-            className="inline-flex h-10 items-center justify-center gap-1.5 rounded-xl bg-slate-900 px-3.5 text-xs font-bold text-white active:scale-95 hover:bg-slate-800 sm:text-sm"
+          <button
+            type="button"
+            onClick={() => setTab('analytics')}
+            className={`inline-flex items-center gap-1.5 rounded-lg px-3.5 py-1.5 text-xs font-bold transition ${
+              tab === 'analytics'
+                ? 'bg-brand-orange text-white'
+                : 'text-brand-brown/75 hover:bg-brand-cream'
+            }`}
           >
-            <Download className="h-4 w-4" />
-            <span>CSV</span>
-          </a>
+            <BarChart3 className="h-3.5 w-3.5" />
+            <span>Analitik Performa</span>
+          </button>
         </div>
+
+        {tab === 'daily' && (
+          <div className="flex flex-wrap items-center gap-2">
+            <input
+              type="date"
+              value={date}
+              onChange={(e) => setDate(e.target.value)}
+              className="h-10 rounded-xl border border-brand-amber-soft bg-white px-3 text-xs font-bold text-brand-brown focus:border-brand-orange focus:outline-none"
+            />
+            <button
+              type="button"
+              onClick={() => void loadDaily()}
+              className="inline-flex h-10 items-center gap-1.5 rounded-xl border border-brand-amber-soft bg-white px-3 text-xs font-bold text-brand-brown hover:bg-brand-cream-deep"
+            >
+              <RefreshCw className={`h-4 w-4 ${loadingDaily ? 'animate-spin' : ''}`} />
+            </button>
+            <a
+              href={api.getCsvExportUrl(date)}
+              download={`laporan-${date}.csv`}
+              className="inline-flex h-10 items-center gap-1.5 rounded-xl bg-brand-brown px-3.5 text-xs font-bold text-brand-cream hover:bg-brand-brown-dark"
+            >
+              <Download className="h-4 w-4" />
+              <span>Export CSV</span>
+            </a>
+          </div>
+        )}
       </div>
 
-      {notice && (
-        <div className="flex items-center justify-between gap-2 rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-medium text-emerald-800">
-          <span>{notice}</span>
-          <button
-            type="button"
-            onClick={() => setNotice(null)}
-            className="rounded-lg p-1 text-emerald-700 hover:bg-emerald-100"
-          >
-            <X className="h-4 w-4" />
-          </button>
-        </div>
-      )}
-
       {error && (
-        <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-700">
+        <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-medium text-rose-700">
           {error}
         </div>
       )}
 
-      {loading || !report ? (
-        <div className="rounded-2xl border border-slate-200 bg-white p-10 text-center text-sm text-slate-500">
-          Memuat laporan harian...
-        </div>
-      ) : (
-        <>
-          {/* Warning if unpaid orders remain */}
-          {report.revenue.unpaid_count > 0 && (
-            <div className="flex items-start gap-3 rounded-2xl border border-amber-300 bg-amber-50 p-3.5 text-amber-900">
-              <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-amber-600" />
-              <div className="text-xs sm:text-sm">
-                <p className="font-bold">
-                  Masih ada {report.revenue.unpaid_count} nota BELUM BAYAR (
-                  {formatRupiah(report.revenue.unpaid_total)}).
-                </p>
-                <p className="mt-0.5 text-amber-800">
-                  Selesaikan pembayaran di tab Kasir sebelum tutup hari.
-                </p>
-              </div>
-            </div>
-          )}
-
-          {/* Compact 2x2 KPI Cards on Android, 4-col on Desktop */}
-          <div className="grid grid-cols-2 gap-2.5 sm:gap-4 lg:grid-cols-4">
-            <div className="rounded-2xl border border-emerald-200 bg-emerald-50/75 p-3.5 sm:p-5">
-              <p className="text-[11px] font-bold uppercase tracking-wide text-emerald-800">
-                Pendapatan Lunas
-              </p>
-              <p className="mt-1.5 text-lg font-extrabold text-emerald-900 sm:text-2xl">
-                {formatRupiah(report.revenue.paid_total)}
-              </p>
-              <p className="mt-0.5 text-[11px] text-emerald-700 sm:text-xs">
-                {report.revenue.paid_count} nota lunas
-              </p>
-            </div>
-
-            <div className="rounded-2xl border border-amber-200 bg-amber-50/75 p-3.5 sm:p-5">
-              <p className="text-[11px] font-bold uppercase tracking-wide text-amber-800">
-                Belum Dibayar
-              </p>
-              <p className="mt-1.5 text-lg font-extrabold text-amber-900 sm:text-2xl">
-                {formatRupiah(report.revenue.unpaid_total)}
-              </p>
-              <p className="mt-0.5 text-[11px] text-amber-700 sm:text-xs">
-                {report.revenue.unpaid_count} nota gantung
-              </p>
-            </div>
-
-            <div className="rounded-2xl border border-slate-200 bg-white p-3.5 sm:p-5">
-              <p className="text-[11px] font-bold uppercase tracking-wide text-slate-500">
-                Porsi Terjual
-              </p>
-              <p className="mt-1.5 text-lg font-extrabold text-slate-900 sm:text-2xl">
-                {report.revenue.total_portions_sold}
-              </p>
-              <p className="mt-0.5 text-[11px] text-slate-500 sm:text-xs">
-                Total nota aktif
-              </p>
-            </div>
-
-            <div className="rounded-2xl border border-slate-200 bg-white p-3.5 sm:p-5">
-              <p className="text-[11px] font-bold uppercase tracking-wide text-slate-500">
-                Nota Batal (Void)
-              </p>
-              <p className="mt-1.5 text-lg font-extrabold text-slate-900 sm:text-2xl">
-                {report.revenue.voided_count} nota
-              </p>
-              <p className="mt-0.5 text-[11px] text-slate-500 sm:text-xs">
-                {formatRupiah(report.revenue.voided_total)}
-              </p>
-            </div>
+      {/* ==================== TAB 1: DAILY REPORT ==================== */}
+      {tab === 'daily' &&
+        (loadingDaily || !report ? (
+          <div className="rounded-2xl border border-brand-amber-soft bg-white p-10 text-center text-sm text-brand-brown/60">
+            Memuat laporan harian...
           </div>
-
-          {/* End-of-day Stock Reconciliation Section */}
-          <div className="rounded-2xl border border-slate-200 bg-white shadow-sm">
-            <div className="flex flex-col gap-3 border-b border-slate-200 px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-5">
-              <div>
-                <h2 className="text-base font-bold text-slate-900">
-                  Rekonsiliasi Stok Akhir Hari ({report.business_date})
-                </h2>
-                <p className="text-xs text-slate-500">
-                  Sisa Sistem = Awal + Restock − Terjual. Ketuk <strong>= Sisa</strong> jika
-                  stok fisik di dapur cocok.
+        ) : (
+          <div className="space-y-4">
+            {/* Revenue, Expenses & Net Profit KPI Cards */}
+            <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
+              <div className="rounded-2xl border border-emerald-200 bg-white p-4 shadow-sm">
+                <p className="text-xs font-semibold text-brand-brown/65">Pendapatan Lunas</p>
+                <p className="mt-1 text-lg font-extrabold text-emerald-700 sm:text-xl">
+                  {formatRupiah(report.revenue.paid_total)}
+                </p>
+                <p className="mt-0.5 text-[11px] text-brand-brown/60">
+                  {report.revenue.paid_count} nota • {report.revenue.total_portions_sold} porsi
                 </p>
               </div>
-              <button
-                type="button"
-                disabled={saving}
-                onClick={() => void handleSavePhysicalStock()}
-                className="inline-flex h-11 items-center justify-center gap-1.5 rounded-xl bg-emerald-600 px-4 text-sm font-bold text-white shadow-sm active:scale-98 hover:bg-emerald-700 disabled:opacity-50"
-              >
-                <Save className="h-4 w-4" />
-                {saving ? 'Menyimpan...' : 'Simpan Opname Fisik'}
-              </button>
+              <div className="rounded-2xl border border-rose-200 bg-white p-4 shadow-sm">
+                <p className="text-xs font-semibold text-brand-brown/65">Pengeluaran Harian</p>
+                <p className="mt-1 text-lg font-extrabold text-rose-700 sm:text-xl">
+                  {formatRupiah(report.revenue.total_expenses)}
+                </p>
+                <p className="mt-0.5 text-[11px] text-brand-brown/60">
+                  {report.expenses.length} catatan biaya
+                </p>
+              </div>
+              <div className="rounded-2xl border border-brand-orange/40 bg-brand-cream-deep/60 p-4 shadow-sm">
+                <p className="text-xs font-bold text-brand-brown">Laba Bersih</p>
+                <p
+                  className={`mt-1 text-lg font-extrabold sm:text-xl ${
+                    report.revenue.net_profit >= 0 ? 'text-brand-brown' : 'text-rose-700'
+                  }`}
+                >
+                  {formatRupiah(report.revenue.net_profit)}
+                </p>
+                <p className="mt-0.5 text-[11px] text-brand-brown/65">Lunas − Pengeluaran</p>
+              </div>
+              <div className="rounded-2xl border border-brand-amber-soft bg-white p-4 shadow-sm">
+                <p className="text-xs font-semibold text-brand-brown/65">Belum Bayar</p>
+                <p className="mt-1 text-lg font-extrabold text-amber-700 sm:text-xl">
+                  {formatRupiah(report.revenue.unpaid_total)}
+                </p>
+                <p className="mt-0.5 text-[11px] text-brand-brown/60">
+                  {report.revenue.unpaid_count} nota
+                </p>
+              </div>
+              <div className="col-span-2 rounded-2xl border border-brand-amber-soft bg-white p-4 shadow-sm lg:col-span-1">
+                <p className="text-xs font-semibold text-brand-brown/65">Dibatalkan (Void)</p>
+                <p className="mt-1 text-lg font-extrabold text-stone-600 sm:text-xl">
+                  {formatRupiah(report.revenue.voided_total)}
+                </p>
+                <p className="mt-0.5 text-[11px] text-brand-brown/60">
+                  {report.revenue.voided_count} nota
+                </p>
+              </div>
             </div>
 
-            {/* Mobile Android Stock Opname Cards (zero horizontal scroll!) */}
-            <div className="divide-y divide-slate-100 md:hidden">
-              {report.stock_reconciliation.length === 0 ? (
-                <div className="p-8 text-center text-sm text-slate-500">
-                  Belum ada data stok pada tanggal {date}.
-                </div>
+            {/* Sales Grouped by Channel */}
+            <div className="rounded-2xl border border-brand-amber-soft bg-white p-4 shadow-sm">
+              <h3 className="text-sm font-extrabold text-brand-brown">
+                Total Penjualan per Channel ({report.business_date})
+              </h3>
+              {report.sales_by_channel.length === 0 ? (
+                <p className="mt-2 text-xs text-brand-brown/60">Belum ada penjualan pada tanggal ini.</p>
               ) : (
-                report.stock_reconciliation.map((row) => {
-                  const draft = drafts[row.menu_item_id] ?? { physical: '', notes: '' };
-                  const parsedPhysical =
-                    draft.physical.trim() === '' ? null : Number(draft.physical);
-                  const liveVariance =
-                    parsedPhysical !== null && !Number.isNaN(parsedPhysical)
-                      ? parsedPhysical - row.system_remaining
-                      : null;
-
-                  return (
-                    <div key={row.menu_item_id} className="space-y-3 p-4">
-                      <div className="flex items-start justify-between gap-2">
-                        <div className="min-w-0">
-                          <h3 className="truncate text-sm font-bold text-slate-900">
-                            {row.menu_name}
-                          </h3>
-                          <p className="text-[11px] text-slate-500">{row.category}</p>
-                        </div>
-                        {renderVarianceBadge(liveVariance)}
+                <div className="mt-3 grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-4">
+                  {report.sales_by_channel.map((ch) => (
+                    <div
+                      key={ch.channel_name}
+                      className="rounded-xl border border-brand-amber-soft bg-brand-cream/60 p-3"
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-extrabold text-brand-brown">
+                          {ch.channel_name}
+                        </span>
+                        <span className="rounded-full bg-white px-2 py-0.5 text-[11px] font-bold text-brand-brown/80">
+                          {ch.order_count} nota
+                        </span>
                       </div>
+                      <p className="mt-1.5 text-base font-extrabold text-brand-orange">
+                        {formatRupiah(ch.total_revenue)}
+                      </p>
+                      <p className="text-[11px] text-brand-brown/65">
+                        Lunas: {formatRupiah(ch.paid_revenue)}
+                        {ch.unpaid_count > 0 ? ` • Belum: ${ch.unpaid_count}` : ''}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
 
-                      {/* 4-cell Stock Breakdown Strip */}
-                      <div className="grid grid-cols-4 gap-1.5 rounded-xl bg-slate-50 p-2 text-center">
-                        <div>
-                          <p className="text-[10px] font-semibold uppercase text-slate-500">
-                            Awal
-                          </p>
-                          <p className="text-sm font-bold text-slate-800">
-                            {row.initial_stock}
-                          </p>
-                        </div>
-                        <div>
-                          <p className="text-[10px] font-semibold uppercase text-slate-500">
-                            Restock
-                          </p>
-                          <p className="text-sm font-bold text-emerald-700">
-                            +{row.restocked_qty}
-                          </p>
-                        </div>
-                        <div>
-                          <p className="text-[10px] font-semibold uppercase text-slate-500">
-                            Terjual
-                          </p>
-                          <p className="text-sm font-bold text-slate-900">{row.sold_qty}</p>
-                        </div>
-                        <div className="rounded-lg bg-slate-200/70 py-0.5">
-                          <p className="text-[10px] font-bold uppercase text-slate-600">
-                            Sisa
-                          </p>
-                          <p className="text-sm font-extrabold text-slate-900">
-                            {row.system_remaining}
-                          </p>
-                        </div>
+            {/* Daily Expenses Recording & List */}
+            <div className="rounded-2xl border border-brand-amber-soft bg-white p-4 shadow-sm">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <Wallet className="h-4 w-4 text-brand-orange" />
+                  <h3 className="text-sm font-extrabold text-brand-brown">
+                    Pengeluaran Harian ({formatRupiah(report.revenue.total_expenses)})
+                  </h3>
+                </div>
+                {isDayClosed && (
+                  <span className="inline-flex items-center gap-1 rounded-full bg-rose-100 px-2.5 py-0.5 text-[11px] font-bold text-rose-700">
+                    <Lock className="h-3 w-3" />
+                    Terkunci (Toko Sudah Tutup)
+                  </span>
+                )}
+              </div>
+
+              {!isDayClosed && (
+                <form
+                  onSubmit={handleAddExpense}
+                  className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-12"
+                >
+                  <input
+                    type="text"
+                    value={expTitle}
+                    onChange={(e) => setExpTitle(e.target.value)}
+                    placeholder="Keterangan (cth: Beli ayam 5kg / Gas 3kg)"
+                    className="h-10 rounded-xl border border-brand-amber-soft px-3 text-xs text-brand-brown focus:border-brand-orange focus:outline-none sm:col-span-4"
+                  />
+                  <select
+                    value={expCategory}
+                    onChange={(e) => setExpCategory(e.target.value)}
+                    className="h-10 rounded-xl border border-brand-amber-soft bg-white px-2.5 text-xs font-semibold text-brand-brown sm:col-span-2"
+                  >
+                    {EXPENSE_CATEGORIES.map((c) => (
+                      <option key={c} value={c}>
+                        {c}
+                      </option>
+                    ))}
+                  </select>
+                  <input
+                    type="number"
+                    min={1}
+                    value={expAmount}
+                    onChange={(e) => setExpAmount(e.target.value)}
+                    placeholder="Nominal (Rp)"
+                    className="h-10 rounded-xl border border-brand-amber-soft px-3 text-xs font-bold text-brand-brown focus:border-brand-orange focus:outline-none sm:col-span-2"
+                  />
+                  <input
+                    type="text"
+                    value={expNotes}
+                    onChange={(e) => setExpNotes(e.target.value)}
+                    placeholder="Catatan (opsional)"
+                    className="h-10 rounded-xl border border-brand-amber-soft px-3 text-xs text-brand-brown focus:border-brand-orange focus:outline-none sm:col-span-2"
+                  />
+                  <button
+                    type="submit"
+                    disabled={savingExp}
+                    className="inline-flex h-10 items-center justify-center gap-1 rounded-xl bg-brand-orange px-3 text-xs font-bold text-white hover:bg-brand-orange-dark disabled:opacity-60 sm:col-span-2"
+                  >
+                    <Plus className="h-4 w-4" />
+                    <span>Catat</span>
+                  </button>
+                </form>
+              )}
+
+              {report.expenses.length > 0 && (
+                <div className="mt-3 divide-y divide-brand-amber-soft/50 rounded-xl border border-brand-amber-soft/70">
+                  {report.expenses.map((ex) => (
+                    <div
+                      key={ex.id}
+                      className="flex flex-wrap items-center justify-between gap-2 px-3 py-2.5 text-xs"
+                    >
+                      <div>
+                        <span className="font-bold text-brand-brown">{ex.title}</span>
+                        <span className="ml-2 rounded-md bg-brand-cream-deep px-1.5 py-0.5 text-[10px] font-semibold text-brand-brown">
+                          {ex.category}
+                        </span>
+                        {ex.notes && (
+                          <p className="text-[11px] text-brand-brown/60">{ex.notes}</p>
+                        )}
                       </div>
-
-                      {/* Physical Count Input + 1-Tap Quick Match Button */}
-                      <div className="flex items-center gap-2">
-                        <div className="flex-1">
-                          <label className="mb-1 block text-[11px] font-semibold text-slate-600">
-                            Stok Fisik Dapur
-                          </label>
-                          <input
-                            type="number"
-                            inputMode="numeric"
-                            min={0}
-                            value={draft.physical}
-                            onChange={(e) =>
-                              updateDraft(row.menu_item_id, { physical: e.target.value })
-                            }
-                            placeholder="Isi angka..."
-                            className="h-11 w-full rounded-xl border border-slate-200 px-3 text-center text-base font-bold text-slate-900 focus:border-emerald-500 focus:outline-none"
-                          />
-                        </div>
-                        <div className="pt-5">
+                      <div className="flex items-center gap-2.5">
+                        <span className="font-extrabold text-rose-700">
+                          -{formatRupiah(ex.amount)}
+                        </span>
+                        {!isDayClosed && (
                           <button
                             type="button"
-                            onClick={() =>
-                              updateDraft(row.menu_item_id, {
-                                physical: String(row.system_remaining),
-                              })
-                            }
-                            className="inline-flex h-11 items-center gap-1 rounded-xl border border-emerald-200 bg-emerald-50 px-3 text-xs font-bold text-emerald-800 active:scale-95 hover:bg-emerald-100"
+                            onClick={() => void handleDeleteExpense(ex.id, ex.title)}
+                            className="rounded-lg p-1 text-rose-600 hover:bg-rose-50"
+                            aria-label="Hapus pengeluaran"
                           >
-                            <Check className="h-4 w-4" />
-                            = Sisa ({row.system_remaining})
+                            <Trash2 className="h-3.5 w-3.5" />
                           </button>
-                        </div>
-                      </div>
-
-                      <input
-                        type="text"
-                        value={draft.notes}
-                        onChange={(e) =>
-                          updateDraft(row.menu_item_id, { notes: e.target.value })
-                        }
-                        placeholder="Catatan selisih (opsional)..."
-                        className="h-10 w-full rounded-xl border border-slate-200 px-3 text-sm focus:border-emerald-500 focus:outline-none"
-                      />
-                    </div>
-                  );
-                })
-              )}
-            </div>
-
-            {/* Desktop Full Reconciliation Table */}
-            <div className="hidden overflow-x-auto md:block">
-              <table className="w-full text-left text-sm">
-                <thead className="border-b border-slate-200 bg-slate-50 text-xs font-semibold uppercase tracking-wide text-slate-500">
-                  <tr>
-                    <th className="px-4 py-3">Menu</th>
-                    <th className="px-3 py-3 text-center">Stok Awal</th>
-                    <th className="px-3 py-3 text-center">Restock</th>
-                    <th className="px-3 py-3 text-center">Terjual</th>
-                    <th className="px-3 py-3 text-center">Batal</th>
-                    <th className="px-3 py-3 text-center">Sisa Sistem</th>
-                    <th className="px-3 py-3 text-center">Stok Fisik</th>
-                    <th className="px-3 py-3 text-center">Selisih</th>
-                    <th className="px-4 py-3">Catatan Selisih</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {report.stock_reconciliation.length === 0 ? (
-                    <tr>
-                      <td colSpan={9} className="px-4 py-8 text-center text-slate-500">
-                        Belum ada data stok pada tanggal {date}.
-                      </td>
-                    </tr>
-                  ) : (
-                    report.stock_reconciliation.map((row) => {
-                      const draft = drafts[row.menu_item_id] ?? { physical: '', notes: '' };
-                      const parsedPhysical =
-                        draft.physical.trim() === '' ? null : Number(draft.physical);
-                      const liveVariance =
-                        parsedPhysical !== null && !Number.isNaN(parsedPhysical)
-                          ? parsedPhysical - row.system_remaining
-                          : null;
-
-                      return (
-                        <tr key={row.menu_item_id}>
-                          <td className="px-4 py-3">
-                            <p className="font-semibold text-slate-900">{row.menu_name}</p>
-                            <p className="text-xs text-slate-500">{row.category}</p>
-                          </td>
-                          <td className="px-3 py-3 text-center font-medium text-slate-700">
-                            {row.initial_stock}
-                          </td>
-                          <td className="px-3 py-3 text-center text-emerald-700">
-                            {row.restocked_qty > 0 ? `+${row.restocked_qty}` : '0'}
-                          </td>
-                          <td className="px-3 py-3 text-center font-bold text-slate-900">
-                            {row.sold_qty}
-                          </td>
-                          <td className="px-3 py-3 text-center text-slate-500">
-                            {row.voided_qty}
-                          </td>
-                          <td className="px-3 py-3 text-center">
-                            <span className="inline-block rounded-lg bg-slate-100 px-2.5 py-1 font-bold text-slate-900">
-                              {row.system_remaining}
-                            </span>
-                          </td>
-                          <td className="px-3 py-3">
-                            <div className="flex items-center justify-center gap-1.5">
-                              <input
-                                type="number"
-                                min={0}
-                                value={draft.physical}
-                                onChange={(e) =>
-                                  updateDraft(row.menu_item_id, { physical: e.target.value })
-                                }
-                                placeholder="—"
-                                className="w-20 rounded-lg border border-slate-200 px-2 py-1.5 text-center text-sm font-semibold focus:border-emerald-500 focus:outline-none"
-                              />
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  updateDraft(row.menu_item_id, {
-                                    physical: String(row.system_remaining),
-                                  })
-                                }
-                                title="Isi sama dengan sisa sistem"
-                                className="rounded-lg bg-emerald-50 px-2 py-1.5 text-[11px] font-bold text-emerald-700 hover:bg-emerald-100"
-                              >
-                                =Sisa
-                              </button>
-                            </div>
-                          </td>
-                          <td className="px-3 py-3 text-center">
-                            {renderVarianceBadge(liveVariance)}
-                          </td>
-                          <td className="px-4 py-3">
-                            <input
-                              type="text"
-                              value={draft.notes}
-                              onChange={(e) =>
-                                updateDraft(row.menu_item_id, { notes: e.target.value })
-                              }
-                              placeholder="cth: 1 porsi rusak/bonus"
-                              className="w-full min-w-[160px] rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs focus:border-emerald-500 focus:outline-none"
-                            />
-                          </td>
-                        </tr>
-                      );
-                    })
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </div>
-
-          {/* Sales breakdown by menu */}
-          <div className="rounded-2xl border border-slate-200 bg-white shadow-sm">
-            <div className="flex items-center gap-2 border-b border-slate-200 px-4 py-3.5 sm:px-5">
-              <TrendingUp className="h-5 w-5 text-emerald-600" />
-              <h2 className="text-base font-bold text-slate-900">
-                Rincian Penjualan per Menu
-              </h2>
-            </div>
-
-            {/* Mobile Sales List */}
-            <div className="divide-y divide-slate-100 md:hidden">
-              {report.sales_by_menu.length === 0 ? (
-                <div className="p-6 text-center text-sm text-slate-500">
-                  Belum ada transaksi penjualan pada tanggal {date}.
-                </div>
-              ) : (
-                report.sales_by_menu.map((item) => (
-                  <div
-                    key={`${item.menu_item_id}-${item.menu_name}`}
-                    className="flex items-center justify-between gap-2 px-4 py-3"
-                  >
-                    <div className="min-w-0">
-                      <p className="truncate text-sm font-bold text-slate-900">
-                        {item.menu_name}
-                      </p>
-                      <p className="text-xs text-slate-500">
-                        Terjual <strong>{item.quantity_sold} porsi</strong>
-                        {item.unpaid_revenue > 0 && (
-                          <span className="ml-1.5 text-amber-700">
-                            • Belum bayar {formatRupiah(item.unpaid_revenue)}
-                          </span>
                         )}
-                      </p>
-                    </div>
-                    <p className="shrink-0 text-sm font-extrabold text-emerald-700">
-                      {formatRupiah(item.total_revenue)}
-                    </p>
-                  </div>
-                ))
-              )}
-            </div>
-
-            {/* Desktop Sales Table */}
-            <div className="hidden overflow-x-auto md:block">
-              <table className="w-full text-left text-sm">
-                <thead className="border-b border-slate-200 bg-slate-50 text-xs font-semibold uppercase tracking-wide text-slate-500">
-                  <tr>
-                    <th className="px-4 py-3">Menu</th>
-                    <th className="px-4 py-3 text-center">Jumlah Terjual</th>
-                    <th className="px-4 py-3 text-right">Omzet Lunas</th>
-                    <th className="px-4 py-3 text-right">Belum Bayar</th>
-                    <th className="px-4 py-3 text-right">Total Nilai</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {report.sales_by_menu.length === 0 ? (
-                    <tr>
-                      <td colSpan={5} className="px-4 py-8 text-center text-slate-500">
-                        Belum ada transaksi penjualan pada tanggal {date}.
-                      </td>
-                    </tr>
-                  ) : (
-                    report.sales_by_menu.map((item) => (
-                      <tr key={`${item.menu_item_id}-${item.menu_name}`}>
-                        <td className="px-4 py-3 font-semibold text-slate-900">
-                          {item.menu_name}
-                        </td>
-                        <td className="px-4 py-3 text-center font-bold text-slate-800">
-                          {item.quantity_sold} porsi
-                        </td>
-                        <td className="px-4 py-3 text-right text-emerald-700">
-                          {formatRupiah(item.paid_revenue)}
-                        </td>
-                        <td className="px-4 py-3 text-right text-amber-700">
-                          {formatRupiah(item.unpaid_revenue)}
-                        </td>
-                        <td className="px-4 py-3 text-right font-bold text-slate-900">
-                          {formatRupiah(item.total_revenue)}
-                        </td>
-                      </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </div>
-
-          {/* Audit log: stock movements */}
-          <div className="rounded-2xl border border-slate-200 bg-white shadow-sm">
-            <button
-              type="button"
-              onClick={() => setShowMovements((v) => !v)}
-              className="flex h-12 w-full items-center justify-between px-4 text-left hover:bg-slate-50 sm:px-5"
-            >
-              <div className="flex items-center gap-2">
-                <History className="h-5 w-5 text-slate-500" />
-                <span className="text-sm font-bold text-slate-900">
-                  Riwayat Mutasi Stok ({movements.length})
-                </span>
-              </div>
-              <span className="text-xs font-bold text-emerald-700">
-                {showMovements ? 'Sembunyikan' : 'Tampilkan'}
-              </span>
-            </button>
-            {showMovements && (
-              <>
-                {/* Mobile Movement Cards */}
-                <div className="divide-y divide-slate-100 border-t border-slate-200 md:hidden">
-                  {movements.map((m) => (
-                    <div
-                      key={m.id}
-                      className="flex items-start justify-between gap-2 px-4 py-3 text-xs"
-                    >
-                      <div className="min-w-0">
-                        <p className="font-bold text-slate-900">{m.menu_name}</p>
-                        <p className="text-slate-500">
-                          {formatTime(m.created_at)} • {movementLabel(m.movement_type)}
-                        </p>
-                        {m.note && <p className="mt-0.5 text-slate-600">{m.note}</p>}
-                      </div>
-                      <div className="shrink-0 text-right">
-                        <p
-                          className={`text-sm font-extrabold ${
-                            m.qty_delta >= 0 ? 'text-emerald-700' : 'text-red-600'
-                          }`}
-                        >
-                          {m.qty_delta > 0 ? `+${m.qty_delta}` : m.qty_delta}
-                        </p>
-                        <p className="text-[11px] text-slate-500">Sisa: {m.stock_after}</p>
                       </div>
                     </div>
                   ))}
                 </div>
+              )}
+            </div>
 
-                {/* Desktop Movement Table */}
-                <div className="hidden overflow-x-auto border-t border-slate-200 md:block">
-                  <table className="w-full text-left text-xs">
-                    <thead className="bg-slate-50 uppercase text-slate-500">
+            {/* Stock Reconciliation per Stock Item */}
+            <div className="rounded-2xl border border-brand-amber-soft bg-white p-4 shadow-sm">
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <h3 className="text-sm font-extrabold text-brand-brown">
+                    Rekonsiliasi Stok Akhir Hari (Per Item Stok)
+                  </h3>
+                  <p className="text-xs text-brand-brown/65">
+                    Stok Awal + Restock − Terpakai = Sisa Sistem
+                  </p>
+                </div>
+                {!isDayClosed && (
+                  <button
+                    type="button"
+                    disabled={!dirty || savingOpname}
+                    onClick={() => void handleSavePhysicalStock()}
+                    className="inline-flex h-9 items-center gap-1.5 rounded-xl bg-brand-orange px-3.5 text-xs font-bold text-white hover:bg-brand-orange-dark disabled:bg-stone-300"
+                  >
+                    <Save className="h-3.5 w-3.5" />
+                    <span>{savingOpname ? 'Menyimpan...' : 'Simpan Opname'}</span>
+                  </button>
+                )}
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="min-w-full divide-y divide-brand-amber-soft/60 text-left text-xs">
+                  <thead className="bg-brand-cream text-[11px] font-bold uppercase text-brand-brown/75">
+                    <tr>
+                      <th className="px-3 py-2.5">Item Stok</th>
+                      <th className="px-3 py-2.5 text-right">Awal</th>
+                      <th className="px-3 py-2.5 text-right">Restock</th>
+                      <th className="px-3 py-2.5 text-right">Terpakai</th>
+                      <th className="px-3 py-2.5 text-right">Sisa Sistem</th>
+                      <th className="px-3 py-2.5 text-right">Stok Fisik</th>
+                      <th className="px-3 py-2.5 text-right">Selisih</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-brand-amber-soft/40">
+                    {report.stock_reconciliation.map((row) => {
+                      const d = drafts[row.stock_item_id];
+                      const parsed = d && d.physical.trim() !== '' ? Number(d.physical) : null;
+                      const variance = parsed === null ? null : parsed - row.system_remaining;
+                      return (
+                        <tr key={row.stock_item_id}>
+                          <td className="px-3 py-2 font-bold text-brand-brown">
+                            {row.stock_name}{' '}
+                            <span className="font-normal text-brand-brown/55">({row.unit})</span>
+                          </td>
+                          <td className="px-3 py-2 text-right">{row.initial_stock}</td>
+                          <td className="px-3 py-2 text-right">{row.restocked_qty}</td>
+                          <td className="px-3 py-2 text-right font-bold">{row.sold_qty}</td>
+                          <td className="px-3 py-2 text-right font-bold text-brand-brown">
+                            {row.system_remaining}
+                          </td>
+                          <td className="px-3 py-2 text-right">
+                            <input
+                              type="number"
+                              min={0}
+                              disabled={isDayClosed}
+                              value={d?.physical ?? ''}
+                              onChange={(e) => {
+                                setDrafts((prev) => ({
+                                  ...prev,
+                                  [row.stock_item_id]: {
+                                    physical: e.target.value,
+                                    notes: prev[row.stock_item_id]?.notes ?? '',
+                                  },
+                                }));
+                                setDirty(true);
+                              }}
+                              className="h-8 w-20 rounded-lg border border-brand-amber-soft bg-white px-2 text-right text-xs font-bold text-brand-brown disabled:bg-stone-100"
+                            />
+                          </td>
+                          <td className="px-3 py-2 text-right font-bold">
+                            {variance === null ? (
+                              <span className="text-stone-400">—</span>
+                            ) : variance === 0 ? (
+                              <span className="text-emerald-700">Cocok (0)</span>
+                            ) : variance < 0 ? (
+                              <span className="text-rose-700">Kurang ({variance})</span>
+                            ) : (
+                              <span className="text-sky-700">Lebih (+{variance})</span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* Menu Sales Table */}
+            {report.sales_by_menu.length > 0 && (
+              <div className="rounded-2xl border border-brand-amber-soft bg-white p-4 shadow-sm">
+                <h3 className="mb-3 text-sm font-extrabold text-brand-brown">
+                  Rincian Penjualan per Menu
+                </h3>
+                <div className="overflow-x-auto">
+                  <table className="min-w-full divide-y divide-brand-amber-soft/60 text-left text-xs">
+                    <thead className="bg-brand-cream text-[11px] font-bold uppercase text-brand-brown/75">
                       <tr>
-                        <th className="px-4 py-2.5">Waktu</th>
-                        <th className="px-4 py-2.5">Menu</th>
-                        <th className="px-4 py-2.5">Aktivitas</th>
-                        <th className="px-4 py-2.5 text-center">Perubahan</th>
-                        <th className="px-4 py-2.5 text-center">Sisa Setelahnya</th>
-                        <th className="px-4 py-2.5">Keterangan</th>
+                        <th className="px-3 py-2">Menu</th>
+                        <th className="px-3 py-2 text-right">Terjual</th>
+                        <th className="px-3 py-2 text-right">Omzet Total</th>
                       </tr>
                     </thead>
-                    <tbody className="divide-y divide-slate-100">
-                      {movements.map((m) => (
-                        <tr key={m.id}>
-                          <td className="px-4 py-2 font-mono text-slate-600">
-                            {formatTime(m.created_at)}
+                    <tbody className="divide-y divide-brand-amber-soft/40">
+                      {report.sales_by_menu.map((m) => (
+                        <tr key={`${m.menu_item_id}-${m.menu_name}`}>
+                          <td className="px-3 py-2 font-bold text-brand-brown">{m.menu_name}</td>
+                          <td className="px-3 py-2 text-right font-semibold">{m.quantity_sold}</td>
+                          <td className="px-3 py-2 text-right font-extrabold text-brand-orange">
+                            {formatRupiah(m.total_revenue)}
                           </td>
-                          <td className="px-4 py-2 font-semibold text-slate-900">
-                            {m.menu_name}
-                          </td>
-                          <td className="px-4 py-2">{movementLabel(m.movement_type)}</td>
-                          <td
-                            className={`px-4 py-2 text-center font-bold ${
-                              m.qty_delta >= 0 ? 'text-emerald-700' : 'text-red-600'
-                            }`}
-                          >
-                            {m.qty_delta > 0 ? `+${m.qty_delta}` : m.qty_delta}
-                          </td>
-                          <td className="px-4 py-2 text-center font-medium text-slate-800">
-                            {m.stock_after}
-                          </td>
-                          <td className="px-4 py-2 text-slate-600">{m.note}</td>
                         </tr>
                       ))}
                     </tbody>
                   </table>
                 </div>
-              </>
+              </div>
+            )}
+
+            {/* Stock Movements Collapsible */}
+            <div className="rounded-2xl border border-brand-amber-soft bg-white p-4 shadow-sm">
+              <button
+                type="button"
+                onClick={() => setShowMovements((v) => !v)}
+                className="flex w-full items-center justify-between text-left"
+              >
+                <span className="inline-flex items-center gap-2 text-sm font-extrabold text-brand-brown">
+                  <History className="h-4 w-4 text-brand-orange" />
+                  Log Mutasi Stok ({movements.length})
+                </span>
+                <span className="text-xs font-bold text-brand-orange">
+                  {showMovements ? 'Sembunyikan' : 'Tampilkan'}
+                </span>
+              </button>
+              {showMovements && (
+                <div className="mt-3 max-h-72 overflow-y-auto divide-y divide-brand-amber-soft/40 text-xs">
+                  {movements.map((mv) => (
+                    <div key={mv.id} className="flex items-center justify-between gap-2 py-2">
+                      <div>
+                        <span className="font-bold text-brand-brown">{mv.stock_name}</span>
+                        <span className="ml-2 rounded bg-brand-cream-deep px-1.5 py-0.5 text-[10px] font-bold">
+                          {movementLabel(mv.movement_type)}
+                        </span>
+                        <p className="text-[11px] text-brand-brown/60">
+                          {formatTime(mv.created_at)} • {mv.note}
+                        </p>
+                      </div>
+                      <div className="text-right font-mono">
+                        <span
+                          className={`font-bold ${
+                            mv.qty_delta >= 0 ? 'text-emerald-700' : 'text-rose-700'
+                          }`}
+                        >
+                          {mv.qty_delta >= 0 ? `+${mv.qty_delta}` : mv.qty_delta}
+                        </span>
+                        <p className="text-[10px] text-brand-brown/55">Sisa: {mv.stock_after}</p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        ))}
+
+      {/* ==================== TAB 2: PERFORMANCE ANALYTICS ==================== */}
+      {tab === 'analytics' && (
+        <div className="space-y-4">
+          {/* Date Range Filter Bar (Hari Ini, 7 Hari, 30 Hari, Bulan Ini, Custom) */}
+          <div className="flex flex-wrap items-center justify-between gap-2.5 rounded-2xl border border-brand-amber-soft bg-white p-3.5 shadow-sm">
+            <div className="flex flex-wrap gap-1.5">
+              {(
+                [
+                  { key: 'today', label: 'Hari Ini' },
+                  { key: '7d', label: '7 Hari' },
+                  { key: '30d', label: '30 Hari' },
+                  { key: 'month', label: 'Bulan Ini' },
+                  { key: 'custom', label: 'Custom' },
+                ] as Array<{ key: AnalyticsPreset; label: string }>
+              ).map((p) => (
+                <button
+                  key={p.key}
+                  type="button"
+                  onClick={() => setPreset(p.key)}
+                  className={`h-9 rounded-xl px-3.5 text-xs font-bold transition ${
+                    preset === p.key
+                      ? 'bg-brand-orange text-white shadow-sm'
+                      : 'bg-brand-cream text-brand-brown hover:bg-brand-cream-deep'
+                  }`}
+                >
+                  {p.label}
+                </button>
+              ))}
+            </div>
+
+            {preset === 'custom' && (
+              <div className="flex flex-wrap items-center gap-2">
+                <input
+                  type="date"
+                  value={customFrom}
+                  onChange={(e) => setCustomFrom(e.target.value)}
+                  className="h-9 rounded-xl border border-brand-amber-soft px-2.5 text-xs font-bold text-brand-brown"
+                />
+                <span className="text-xs font-bold text-brand-brown/60">s/d</span>
+                <input
+                  type="date"
+                  value={customTo}
+                  onChange={(e) => setCustomTo(e.target.value)}
+                  className="h-9 rounded-xl border border-brand-amber-soft px-2.5 text-xs font-bold text-brand-brown"
+                />
+              </div>
             )}
           </div>
-        </>
-      )}
 
-      {/* Mobile Floating Save Bar when physical stock inputs are modified */}
-      {dirty && (
-        <div className="fixed inset-x-3 bottom-[72px] z-30 md:hidden">
-          <button
-            type="button"
-            disabled={saving}
-            onClick={() => void handleSavePhysicalStock()}
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-2xl bg-emerald-600 text-sm font-bold text-white shadow-lg shadow-emerald-900/25 active:scale-[0.99] disabled:opacity-50"
-          >
-            <Save className="h-4 w-4" />
-            {saving ? 'Menyimpan Opname...' : 'Simpan Perubahan Opname Fisik'}
-          </button>
+          {loadingAnalytics || !analytics ? (
+            <div className="rounded-2xl border border-brand-amber-soft bg-white p-10 text-center text-sm text-brand-brown/60">
+              Menghitung analitik performa...
+            </div>
+          ) : (
+            <div className="space-y-4">
+              {/* KPI Overview */}
+              <div className="grid grid-cols-2 gap-3 lg:grid-cols-6">
+                <div className="rounded-2xl border border-emerald-200 bg-white p-3.5 shadow-sm">
+                  <p className="text-[11px] font-semibold text-brand-brown/65">Total Pendapatan</p>
+                  <p className="mt-1 text-base font-extrabold text-emerald-700">
+                    {formatRupiah(analytics.summary.total_revenue)}
+                  </p>
+                </div>
+                <div className="rounded-2xl border border-rose-200 bg-white p-3.5 shadow-sm">
+                  <p className="text-[11px] font-semibold text-brand-brown/65">Total Pengeluaran</p>
+                  <p className="mt-1 text-base font-extrabold text-rose-700">
+                    {formatRupiah(analytics.summary.total_expenses)}
+                  </p>
+                </div>
+                <div className="rounded-2xl border border-brand-orange/40 bg-brand-cream-deep/70 p-3.5 shadow-sm">
+                  <p className="text-[11px] font-bold text-brand-brown">Laba Bersih</p>
+                  <p className="mt-1 text-base font-extrabold text-brand-brown">
+                    {formatRupiah(analytics.summary.net_profit)}
+                  </p>
+                </div>
+                <div className="rounded-2xl border border-brand-amber-soft bg-white p-3.5 shadow-sm">
+                  <p className="text-[11px] font-semibold text-brand-brown/65">Nota / Porsi</p>
+                  <p className="mt-1 text-base font-extrabold text-brand-brown">
+                    {analytics.summary.paid_orders} / {analytics.summary.total_portions}
+                  </p>
+                </div>
+                <div className="rounded-2xl border border-brand-amber-soft bg-white p-3.5 shadow-sm">
+                  <p className="text-[11px] font-semibold text-brand-brown/65">Rata-rata / Nota</p>
+                  <p className="mt-1 text-base font-extrabold text-brand-orange">
+                    {formatRupiah(analytics.summary.avg_order_value)}
+                  </p>
+                </div>
+                <div className="rounded-2xl border border-brand-amber-soft bg-white p-3.5 shadow-sm">
+                  <p className="text-[11px] font-semibold text-brand-brown/65">Hari Tutup / Aktif</p>
+                  <p className="mt-1 text-base font-extrabold text-brand-brown">
+                    {analytics.summary.closed_days_count} / {analytics.summary.active_days_count}
+                  </p>
+                </div>
+              </div>
+
+              {/* Channel Breakdown */}
+              <div className="rounded-2xl border border-brand-amber-soft bg-white p-4 shadow-sm">
+                <h3 className="mb-3 text-sm font-extrabold text-brand-brown">
+                  Performa Penjualan per Channel ({analytics.from_date} – {analytics.to_date})
+                </h3>
+                {analytics.by_channel.length === 0 ? (
+                  <p className="text-xs text-brand-brown/60">Belum ada data transaksi pada rentang ini.</p>
+                ) : (
+                  <div className="space-y-3">
+                    {analytics.by_channel.map((ch) => (
+                      <div key={ch.channel_name} className="space-y-1">
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="font-bold text-brand-brown">
+                            {ch.channel_name}{' '}
+                            <span className="font-normal text-brand-brown/60">
+                              ({ch.order_count} nota)
+                            </span>
+                          </span>
+                          <span className="font-extrabold text-brand-orange">
+                            {formatRupiah(ch.revenue)} ({ch.share_percent}%)
+                          </span>
+                        </div>
+                        <div className="h-2.5 w-full overflow-hidden rounded-full bg-brand-cream-deep">
+                          <div
+                            className="h-full rounded-full bg-brand-orange"
+                            style={{ width: `${Math.min(100, Math.max(2, ch.share_percent))}%` }}
+                          />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Daily Trend */}
+              <div className="rounded-2xl border border-brand-amber-soft bg-white p-4 shadow-sm">
+                <h3 className="mb-3 text-sm font-extrabold text-brand-brown">
+                  Tren Harian (Pendapatan vs Pengeluaran)
+                </h3>
+                {analytics.daily_trend.length === 0 ? (
+                  <p className="text-xs text-brand-brown/60">Belum ada data harian.</p>
+                ) : (
+                  <div className="space-y-2.5">
+                    {analytics.daily_trend.map((d) => (
+                      <div
+                        key={d.business_date}
+                        className="rounded-xl border border-brand-amber-soft/60 bg-brand-cream/40 p-3 text-xs"
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex items-center gap-2">
+                            <span className="font-mono font-bold text-brand-brown">
+                              {d.business_date}
+                            </span>
+                            <span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-bold text-brand-brown/75">
+                              {d.store_status}
+                            </span>
+                            <span className="text-brand-brown/65">
+                              {d.order_count} nota • {d.portions_sold} porsi
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-3 font-bold">
+                            <span className="text-emerald-700">+{formatRupiah(d.revenue)}</span>
+                            <span className="text-rose-700">-{formatRupiah(d.expenses)}</span>
+                            <span className="text-brand-brown">
+                              Bersih: {formatRupiah(d.net_profit)}
+                            </span>
+                          </div>
+                        </div>
+                        <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-white">
+                          <div
+                            className="h-full rounded-full bg-emerald-500"
+                            style={{
+                              width: `${Math.max(2, Math.round((d.revenue / maxTrendRev) * 100))}%`,
+                            }}
+                          />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Per-User Nota Creation Interval */}
+              <div className="rounded-2xl border border-brand-amber-soft bg-white p-4 shadow-sm">
+                <div className="mb-3 flex items-center gap-2">
+                  <Clock className="h-4 w-4 text-brand-orange" />
+                  <h3 className="text-sm font-extrabold text-brand-brown">
+                    Interval Pembuatan Nota per Pengguna
+                  </h3>
+                </div>
+                {analytics.user_order_intervals.length === 0 ? (
+                  <p className="text-xs text-brand-brown/60">Belum ada data pembuatan nota.</p>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="min-w-full divide-y divide-brand-amber-soft/60 text-left text-xs">
+                      <thead className="bg-brand-cream text-[11px] font-bold uppercase text-brand-brown/75">
+                        <tr>
+                          <th className="px-3 py-2">Username</th>
+                          <th className="px-3 py-2 text-right">Nota Dibuat</th>
+                          <th className="px-3 py-2 text-right">Rata-rata Interval</th>
+                          <th className="px-3 py-2 text-right">Tercepat</th>
+                          <th className="px-3 py-2 text-right">Terlama</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-brand-amber-soft/40">
+                        {analytics.user_order_intervals.map((u) => (
+                          <tr key={u.username}>
+                            <td className="px-3 py-2 font-mono font-bold text-brand-brown">
+                              @{u.username}
+                            </td>
+                            <td className="px-3 py-2 text-right font-bold">{u.orders_created}</td>
+                            <td className="px-3 py-2 text-right font-extrabold text-brand-orange">
+                              {formatDurationSeconds(u.avg_interval_seconds)}
+                            </td>
+                            <td className="px-3 py-2 text-right text-emerald-700">
+                              {formatDurationSeconds(u.min_interval_seconds)}
+                            </td>
+                            <td className="px-3 py-2 text-right text-brand-brown/75">
+                              {formatDurationSeconds(u.max_interval_seconds)}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+
+              {/* Peak Hours & Busiest Weekdays */}
+              <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+                <div className="rounded-2xl border border-brand-amber-soft bg-white p-4 shadow-sm">
+                  <h3 className="mb-3 text-sm font-extrabold text-brand-brown">
+                    Jam Ramai (Peak Hours WIB)
+                  </h3>
+                  {analytics.peak_hours.length === 0 ? (
+                    <p className="text-xs text-brand-brown/60">Belum ada data jam ramai.</p>
+                  ) : (
+                    <div className="space-y-2">
+                      {analytics.peak_hours.map((p) => (
+                        <div key={p.hour} className="flex items-center gap-2 text-xs">
+                          <span className="w-12 font-mono font-bold text-brand-brown">
+                            {p.label}
+                          </span>
+                          <div className="h-3 flex-1 overflow-hidden rounded-full bg-brand-cream-deep">
+                            <div
+                              className="h-full rounded-full bg-brand-orange"
+                              style={{
+                                width: `${Math.max(5, Math.round((p.order_count / maxPeakOrders) * 100))}%`,
+                              }}
+                            />
+                          </div>
+                          <span className="w-24 text-right font-semibold text-brand-brown">
+                            {p.order_count} nota
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <div className="rounded-2xl border border-brand-amber-soft bg-white p-4 shadow-sm">
+                  <h3 className="mb-3 text-sm font-extrabold text-brand-brown">
+                    Hari Tersibuk (Senin – Minggu)
+                  </h3>
+                  <div className="space-y-2">
+                    {analytics.by_weekday.map((w) => (
+                      <div key={w.weekday_index} className="flex items-center gap-2 text-xs">
+                        <span className="w-16 font-bold text-brand-brown">{w.label}</span>
+                        <div className="h-3 flex-1 overflow-hidden rounded-full bg-brand-cream-deep">
+                          <div
+                            className="h-full rounded-full bg-brand-brown"
+                            style={{
+                              width: `${
+                                w.revenue > 0
+                                  ? Math.max(4, Math.round((w.revenue / maxWeekdayRev) * 100))
+                                  : 0
+                              }%`,
+                            }}
+                          />
+                        </div>
+                        <span className="w-28 text-right font-semibold text-brand-brown">
+                          {formatRupiah(w.revenue)}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              {/* Top & Bottom Menus */}
+              <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+                <div className="rounded-2xl border border-brand-amber-soft bg-white p-4 shadow-sm">
+                  <h3 className="mb-2.5 text-sm font-extrabold text-brand-brown">Menu Terlaris</h3>
+                  {analytics.top_menus.length === 0 ? (
+                    <p className="text-xs text-brand-brown/60">Belum ada penjualan.</p>
+                  ) : (
+                    <div className="divide-y divide-brand-amber-soft/40 text-xs">
+                      {analytics.top_menus.map((m, i) => (
+                        <div key={m.menu_name} className="flex items-center justify-between py-2">
+                          <span className="font-bold text-brand-brown">
+                            {i + 1}. {m.menu_name}
+                          </span>
+                          <span className="font-semibold text-brand-orange">
+                            {m.quantity_sold} porsi • {formatRupiah(m.total_revenue)}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <div className="rounded-2xl border border-brand-amber-soft bg-white p-4 shadow-sm">
+                  <h3 className="mb-2.5 text-sm font-extrabold text-brand-brown">
+                    Menu Kurang Laris
+                  </h3>
+                  {analytics.bottom_menus.length === 0 ? (
+                    <p className="text-xs text-brand-brown/60">Belum ada penjualan.</p>
+                  ) : (
+                    <div className="divide-y divide-brand-amber-soft/40 text-xs">
+                      {analytics.bottom_menus.map((m) => (
+                        <div key={m.menu_name} className="flex items-center justify-between py-2">
+                          <span className="font-bold text-brand-brown">{m.menu_name}</span>
+                          <span className="font-semibold text-brand-brown/75">
+                            {m.quantity_sold} porsi • {formatRupiah(m.total_revenue)}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Stock Usage & Variance History */}
+              {analytics.stock_summary.length > 0 && (
+                <div className="rounded-2xl border border-brand-amber-soft bg-white p-4 shadow-sm">
+                  <h3 className="mb-3 text-sm font-extrabold text-brand-brown">
+                    Ringkasan Pemakaian &amp; Selisih Stok
+                  </h3>
+                  <div className="overflow-x-auto">
+                    <table className="min-w-full divide-y divide-brand-amber-soft/60 text-left text-xs">
+                      <thead className="bg-brand-cream text-[11px] font-bold uppercase text-brand-brown/75">
+                        <tr>
+                          <th className="px-3 py-2">Item Stok</th>
+                          <th className="px-3 py-2 text-right">Total Stok Masuk</th>
+                          <th className="px-3 py-2 text-right">Terpakai</th>
+                          <th className="px-3 py-2 text-right">Sisa Tak Terjual</th>
+                          <th className="px-3 py-2 text-right">Selisih Opname</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-brand-amber-soft/40">
+                        {analytics.stock_summary.map((s) => (
+                          <tr key={s.stock_item_id}>
+                            <td className="px-3 py-2 font-bold text-brand-brown">
+                              {s.stock_name}{' '}
+                              <span className="font-normal text-brand-brown/55">({s.unit})</span>
+                            </td>
+                            <td className="px-3 py-2 text-right">{s.total_supplied}</td>
+                            <td className="px-3 py-2 text-right font-bold">{s.total_sold}</td>
+                            <td className="px-3 py-2 text-right">{s.total_leftover}</td>
+                            <td className="px-3 py-2 text-right font-bold">
+                              {s.opname_days === 0 ? (
+                                <span className="text-stone-400">Belum opname</span>
+                              ) : s.total_variance === 0 ? (
+                                <span className="text-emerald-700">0</span>
+                              ) : s.total_variance < 0 ? (
+                                <span className="text-rose-700">{s.total_variance}</span>
+                              ) : (
+                                <span className="text-sky-700">+{s.total_variance}</span>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
     </div>

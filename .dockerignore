@@ -1,0 +1,16 @@
+.git
+.gitignore
+.agents
+graphify-out
+README.md
+
+dist
+backend/target
+backend/data
+
+frontend/node_modules
+frontend/dist
+frontend/*.tsbuildinfo
+
+.DS_Store
+Thumbs.db

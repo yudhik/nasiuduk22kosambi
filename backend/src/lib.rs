@@ -1,17 +1,24 @@
+pub mod auth;
 pub mod db;
 pub mod error;
 pub mod handlers;
 pub mod models;
 
+use auth::AuthConfig;
 use axum::{
-    routing::{get, post, put},
+    extract::{DefaultBodyLimit, State},
+    http::{header, HeaderValue, Method},
+    middleware::{self, Next},
+    response::Response,
+    routing::{delete, get, post, put},
     Json, Router,
 };
+use error::AppError;
 use serde_json::{json, Value};
 use sqlx::SqlitePool;
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
+use tokio::sync::Semaphore;
 use tower_http::{
-    cors::{Any, CorsLayer},
     services::{ServeDir, ServeFile},
     trace::TraceLayer,
 };
@@ -19,30 +26,158 @@ use tower_http::{
 #[derive(Clone)]
 pub struct AppState {
     pub pool: SqlitePool,
+    pub auth_config: AuthConfig,
+    pub hash_semaphore: Arc<Semaphore>,
+}
+
+impl AppState {
+    pub fn new(pool: SqlitePool, auth_config: AuthConfig) -> Self {
+        Self {
+            pool,
+            auth_config: auth_config.redacted_for_state(),
+            // Cap concurrent Argon2id calls to 2 (~38 MiB peak RAM) to protect 1 vCPU / 956 MiB host
+            hash_semaphore: Arc::new(Semaphore::new(2)),
+        }
+    }
 }
 
 async fn health_check() -> Json<Value> {
     Json(json!({ "status": "ok" }))
 }
 
+/// Defense-in-depth CSRF guard for state-changing API routes:
+/// requires either `Sec-Fetch-Site: same-origin` (or `none`) or custom `X-Requested-With` header.
+async fn csrf_guard(
+    req: axum::http::Request<axum::body::Body>,
+    next: Next,
+) -> Result<Response, AppError> {
+    let is_mutating = matches!(
+        *req.method(),
+        Method::POST | Method::PUT | Method::PATCH | Method::DELETE
+    );
+    if is_mutating {
+        if let Some(sfs) = req
+            .headers()
+            .get("sec-fetch-site")
+            .and_then(|v| v.to_str().ok())
+        {
+            if sfs != "same-origin" && sfs != "none" {
+                return Err(AppError::Forbidden(
+                    "Permintaan lintas-situs ditolak (CSRF protection)".into(),
+                ));
+            }
+        }
+    }
+    Ok(next.run(req).await)
+}
+
+async fn security_headers(
+    State(state): State<AppState>,
+    req: axum::http::Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    let is_api = req.uri().path().starts_with("/api/");
+    let mut res = next.run(req).await;
+    let headers = res.headers_mut();
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    headers.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("same-origin"),
+    );
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'",
+        ),
+    );
+    if state.auth_config.cookie_secure {
+        headers.insert(
+            header::STRICT_TRANSPORT_SECURITY,
+            HeaderValue::from_static("max-age=31536000; includeSubDomains"),
+        );
+    }
+    if is_api && !headers.contains_key(header::CACHE_CONTROL) {
+        headers.insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("no-store"),
+        );
+    }
+    res
+}
+
 pub fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
+    // Tight 4 KiB body limit on /api/auth/login to prevent oversized payload abuse
+    let login_route = Router::new()
+        .route("/auth/login", post(handlers::auth::login))
+        .layer(DefaultBodyLimit::max(4 * 1024));
+
     let api_routes = Router::new()
         .route("/health", get(health_check))
-        // Menus & Daily Stock
+        .merge(login_route)
+        // Authentication (Unified for all roles including Admin)
+        .route("/auth/logout", post(handlers::auth::logout))
+        .route("/auth/me", get(handlers::auth::me))
+        // Admin: User Management & Login/Logout Audit
+        .route(
+            "/admin/users",
+            get(handlers::admin::list_users).post(handlers::admin::create_user),
+        )
+        .route("/admin/users/:id", put(handlers::admin::update_user))
+        .route(
+            "/admin/users/:id/reset-password",
+            post(handlers::admin::reset_password),
+        )
+        .route("/admin/users/:id/unlock", post(handlers::admin::unlock_user))
+        .route("/admin/sessions", get(handlers::admin::list_sessions))
+        .route("/admin/auth-events", get(handlers::admin::list_auth_events))
+        // Daily Store Open / Close Lifecycle
+        .route("/store/status", get(handlers::store::get_store_status))
+        .route("/store/open", post(handlers::store::open_store))
+        .route("/store/close", post(handlers::store::close_store))
+        // Stock Items (Separate daily stock entities)
+        .route(
+            "/stocks",
+            get(handlers::stocks::list_stocks).post(handlers::stocks::create_stock),
+        )
+        .route(
+            "/stocks/:id",
+            put(handlers::stocks::update_stock).delete(handlers::stocks::delete_stock),
+        )
+        .route("/stocks/:id/restock", post(handlers::stocks::restock_item))
+        .route(
+            "/stocks/:id/set-initial",
+            post(handlers::stocks::set_initial_stock_item),
+        )
+        // Menus & CSV Import
         .route(
             "/menus",
             get(handlers::menu::list_menus).post(handlers::menu::create_menu),
+        )
+        .route("/menus/import-csv", post(handlers::menu::import_menus_csv))
+        .route(
+            "/menus/template.csv",
+            get(handlers::menu::download_menu_csv_template),
         )
         .route(
             "/menus/:id",
             put(handlers::menu::update_menu).delete(handlers::menu::delete_menu),
         )
+        // Extensible Sales Channels
         .route(
-            "/menus/:id/stock/set-initial",
-            post(handlers::menu::set_initial_stock),
+            "/channels",
+            get(handlers::channels::list_channels).post(handlers::channels::create_channel),
         )
-        .route("/menus/:id/stock/restock", post(handlers::menu::restock_menu))
-        .route("/stock/start-day", post(handlers::menu::start_day))
+        .route("/channels/:id", put(handlers::channels::update_channel))
+        // Daily Expenses
+        .route(
+            "/expenses",
+            get(handlers::expenses::list_expenses).post(handlers::expenses::create_expense),
+        )
+        .route("/expenses/:id", delete(handlers::expenses::delete_expense))
         // Orders (Nota Digital)
         .route(
             "/orders",
@@ -51,7 +186,7 @@ pub fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         .route("/orders/:id", get(handlers::orders::get_order))
         .route("/orders/:id/pay", post(handlers::orders::pay_order))
         .route("/orders/:id/void", post(handlers::orders::void_order))
-        // Reports & Reconciliation
+        // Reports, Reconciliation & Performance Analytics
         .route("/reports/daily", get(handlers::reports::get_daily_report))
         .route(
             "/reports/daily/physical-stock",
@@ -64,19 +199,19 @@ pub fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         .route(
             "/reports/movements",
             get(handlers::reports::list_stock_movements),
-        );
+        )
+        .route(
+            "/analytics/performance",
+            get(handlers::reports::get_performance_analytics),
+        )
+        // Return JSON 404 for unknown /api/* paths instead of serving index.html
+        .fallback(|| async { AppError::NotFound("Endpoint API tidak ditemukan".into()) })
+        .layer(middleware::from_fn(csrf_guard))
+        .layer(DefaultBodyLimit::max(2 * 1024 * 1024));
 
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
+    let mut router = Router::new().nest("/api", api_routes);
 
-    let mut router = Router::new()
-        .nest("/api", api_routes)
-        .layer(cors)
-        .layer(TraceLayer::new_for_http())
-        .with_state(state);
-
+    // Attach SPA fallback BEFORE security_headers & TraceLayer so index.html & static assets also get security headers!
     if let Some(dir) = static_dir {
         if dir.exists() {
             let index_file = dir.join("index.html");
@@ -86,4 +221,10 @@ pub fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
     }
 
     router
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            security_headers,
+        ))
+        .layer(TraceLayer::new_for_http())
+        .with_state(state)
 }

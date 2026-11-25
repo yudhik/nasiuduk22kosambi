@@ -1,3 +1,9 @@
+pub mod admin;
+pub mod auth;
+pub mod channels;
+pub mod expenses;
 pub mod menu;
 pub mod orders;
 pub mod reports;
+pub mod stocks;
+pub mod store;

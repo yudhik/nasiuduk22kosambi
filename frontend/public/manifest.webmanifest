@@ -1,9 +1,8 @@
 {
-  "name": "NotaDigital — Pemesanan & Stok Harian",
-  "short_name": "NotaDigital",
+  "name": "Nasi Uduk 22 Kosambi - Mpok Indri",
+  "short_name": "Nasi Uduk 22",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#f8fafc",
-  "theme_color": "#059669",
-  "orientation": "portrait-primary"
+  "background_color": "#FFFBF0",
+  "theme_color": "#541A03"
 }
