@@ -842,3 +842,234 @@ async fn test_security_hardening_regression_guards() {
     let waiter_st: StoreStatusResponse = serde_json::from_value(waiter_st_val).unwrap();
     assert!(waiter_st.closing_summary.is_none());
 }
+
+#[tokio::test]
+async fn test_self_stock_menu_and_delete_archive_rules() {
+    let cfg = test_auth_config(5, 15);
+    let (app, _pool) = setup_app_with_config(cfg.clone()).await;
+
+    let (status, _, admin_cookie) =
+        login_request(&app, &cfg.admin_username, &cfg.admin_password).await;
+    assert_eq!(status, StatusCode::OK);
+    let admin_cookie = admin_cookie.unwrap();
+
+    // 1. Reject invalid create_self_stock_qty (<= 0)
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/menus",
+        Some(&admin_cookie),
+        Some(json!({
+            "name": "Tempe Orek",
+            "category": "Lauk",
+            "price": 5000,
+            "create_self_stock_qty": 0
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // 2. Create menu with create_self_stock_qty -> auto-creates and links self stock
+    let (status, menu_val, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/menus",
+        Some(&admin_cookie),
+        Some(json!({
+            "name": "Tempe Orek",
+            "category": "Lauk",
+            "price": 5000,
+            "create_self_stock_qty": 1
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let menu: MenuItem = serde_json::from_value(menu_val).unwrap();
+    assert_eq!(menu.stock_requirements.len(), 1);
+    let self_stock_id = menu.stock_requirements[0].stock_item_id;
+
+    // 3. Reject duplicate self-stock when also passed in stock_requirements
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/menus",
+        Some(&admin_cookie),
+        Some(json!({
+            "name": "Tempe Orek",
+            "category": "Lauk",
+            "price": 6000,
+            "stock_requirements": [{ "stock_item_id": self_stock_id, "qty_per_unit": 1 }],
+            "create_self_stock_qty": 2
+        })),
+    )
+    .await;
+    // Duplicate menu name returns 409; test with a fresh stock name for 400 validation
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    let (status, dup_stk_val, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/stocks",
+        Some(&admin_cookie),
+        Some(json!({ "name": "Sambal Kacang", "unit": "porsi" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let dup_stk: StockItem = serde_json::from_value(dup_stk_val).unwrap();
+
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/menus",
+        Some(&admin_cookie),
+        Some(json!({
+            "name": "Sambal Kacang",
+            "category": "Pelengkap",
+            "price": 2000,
+            "stock_requirements": [{ "stock_item_id": dup_stk.id, "qty_per_unit": 1 }],
+            "create_self_stock_qty": 2
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // 4. Cannot delete stock still linked to an active menu (409)
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::DELETE,
+        &format!("/api/stocks/{self_stock_id}"),
+        Some(&admin_cookie),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    // 5. Hard-delete unused menu -> soft_deleted: false, reason absent; then hard-delete stock
+    let (status, del_val, _) = send_json_with_cookie(
+        &app,
+        Method::DELETE,
+        &format!("/api/menus/{}", menu.id),
+        Some(&admin_cookie),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(del_val["deleted"], true);
+    assert_eq!(del_val["soft_deleted"], false);
+    assert!(del_val.get("reason").is_none());
+
+    let (status, del_stk_val, _) = send_json_with_cookie(
+        &app,
+        Method::DELETE,
+        &format!("/api/stocks/{self_stock_id}"),
+        Some(&admin_cookie),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(del_stk_val["soft_deleted"], false);
+
+    // 6. Menu with VOIDED order -> soft-deleted with VOID reason; stock with >0 qty blocked until closed
+    let (status, menu2_val, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/menus",
+        Some(&admin_cookie),
+        Some(json!({
+            "name": "Semur Jengkol",
+            "category": "Lauk",
+            "price": 12000,
+            "create_self_stock_qty": 1
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let menu2: MenuItem = serde_json::from_value(menu2_val).unwrap();
+    let stock2_id = menu2.stock_requirements[0].stock_item_id;
+
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/store/open",
+        Some(&admin_cookie),
+        Some(json!({ "stocks": [{ "stock_item_id": stock2_id, "initial_stock": 5 }] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (_, ch_val, _) =
+        send_json_with_cookie(&app, Method::GET, "/api/channels", Some(&admin_cookie), None).await;
+    let channels: Vec<SalesChannel> = serde_json::from_value(ch_val).unwrap();
+    let regular_id = channels.iter().find(|c| c.code == "regular").unwrap().id;
+
+    let (status, ord_val, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/orders",
+        Some(&admin_cookie),
+        Some(json!({
+            "channel_id": regular_id,
+            "items": [{ "menu_item_id": menu2.id, "quantity": 1 }]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let ord: OrderDetail = serde_json::from_value(ord_val).unwrap();
+
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        &format!("/api/orders/{}/void", ord.id),
+        Some(&admin_cookie),
+        Some(json!({ "reason": "Batal pesan" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Deleting menu2 archives it with VOID reason
+    let (status, del_m2, _) = send_json_with_cookie(
+        &app,
+        Method::DELETE,
+        &format!("/api/menus/{}", menu2.id),
+        Some(&admin_cookie),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(del_m2["soft_deleted"], true);
+    assert!(del_m2["reason"].as_str().unwrap().contains("VOID"));
+
+    // Deleting stock2 while current_stock == 5 is blocked (409) to preserve audit trail
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::DELETE,
+        &format!("/api/stocks/{stock2_id}"),
+        Some(&admin_cookie),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    // After closing store (resets current_stock to 0 with CLOSE_RESET movement), stock2 archives cleanly
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/store/close",
+        Some(&admin_cookie),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, del_s2, _) = send_json_with_cookie(
+        &app,
+        Method::DELETE,
+        &format!("/api/stocks/{stock2_id}"),
+        Some(&admin_cookie),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(del_s2["soft_deleted"], true);
+    assert!(del_s2["reason"].as_str().is_some());
+}

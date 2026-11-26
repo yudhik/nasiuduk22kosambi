@@ -200,12 +200,20 @@ pub async fn delete_stock(
     auth.require_roles(&[Role::Owner, Role::Admin])?;
 
     let mut tx = begin_write_tx(&state.pool).await?;
-    let exists: Option<(i64,)> = sqlx::query_as("SELECT id FROM stock_items WHERE id = ?")
-        .bind(id)
-        .fetch_optional(&mut *tx)
-        .await?;
-    if exists.is_none() {
+    let existing: Option<(i64, i64)> =
+        sqlx::query_as("SELECT id, current_stock FROM stock_items WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let Some((_, current_stock)) = existing else {
         return Err(AppError::NotFound(format!("Item stok #{id} tidak ditemukan")));
+    };
+
+    if current_stock > 0 {
+        return Err(AppError::Conflict(
+            "Item stok masih memiliki sisa stok (> 0). Nolkan melalui 'Koreksi Awal' atau tutup toko terlebih dahulu sebelum menghapus."
+                .into(),
+        ));
     }
 
     let active_menu_refs: (i64,) = sqlx::query_as(

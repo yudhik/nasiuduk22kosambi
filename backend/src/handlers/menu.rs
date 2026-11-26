@@ -301,11 +301,19 @@ pub async fn create_menu(
 
     if let Some(self_qty) = req.create_self_stock_qty {
         let existing_stock: Option<(i64, i64)> = sqlx::query_as(
-            "SELECT id, is_active FROM stock_items WHERE LOWER(name) = LOWER(?) LIMIT 1",
+            "SELECT id, is_active FROM stock_items WHERE name = ? COLLATE NOCASE LIMIT 1",
         )
         .bind(name)
         .fetch_optional(&mut *tx)
         .await?;
+
+        if let Some((sid, _)) = existing_stock {
+            if requirements.iter().any(|r| r.stock_item_id == sid) {
+                return Err(AppError::Validation(
+                    "Item stok yang sama tidak boleh dipilih ganda dengan opsi stok sendiri".into(),
+                ));
+            }
+        }
 
         let self_stock_id = match existing_stock {
             Some((sid, 1)) => sid,
@@ -333,12 +341,10 @@ pub async fn create_menu(
             }
         };
 
-        if !requirements.iter().any(|r| r.stock_item_id == self_stock_id) {
-            requirements.push(MenuStockRequirementInput {
-                stock_item_id: self_stock_id,
-                qty_per_unit: self_qty,
-            });
-        }
+        requirements.push(MenuStockRequirementInput {
+            stock_item_id: self_stock_id,
+            qty_per_unit: self_qty,
+        });
     }
 
     let requirements = validate_requirements(&requirements)?;
