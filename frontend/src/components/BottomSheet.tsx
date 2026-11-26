@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useId, useRef } from 'react';
 import { X } from 'lucide-react';
 
 interface BottomSheetProps {
@@ -18,50 +18,59 @@ export function BottomSheet({
   children,
   footer,
 }: BottomSheetProps) {
+  const titleId = useId();
+  const subtitleId = useId();
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+
   useEffect(() => {
     if (!open) return;
     const prevOverflow = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
+      if (e.key === 'Escape') onCloseRef.current();
     };
     window.addEventListener('keydown', onKey);
     return () => {
       document.body.style.overflow = prevOverflow;
       window.removeEventListener('keydown', onKey);
     };
-  }, [open, onClose]);
+  }, [open]);
 
   if (!open) return null;
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-end justify-center bg-slate-900/60 backdrop-blur-[1px] sm:items-center sm:p-4"
-      onClick={onClose}
+      className="fixed inset-0 z-50 flex items-end justify-center bg-brand-brown-dark/55 backdrop-blur-[1px] sm:items-center sm:p-4"
+      onClick={() => onCloseRef.current()}
     >
       <div
-        className="flex max-h-[90dvh] w-full flex-col overflow-hidden rounded-t-3xl bg-white shadow-2xl sm:max-w-lg sm:rounded-2xl"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        aria-describedby={subtitle ? subtitleId : undefined}
+        className="flex max-h-[90dvh] w-full flex-col overflow-hidden rounded-t-3xl border border-brand-amber-soft bg-white shadow-2xl sm:max-w-lg sm:rounded-2xl"
         onClick={(e) => e.stopPropagation()}
       >
-        {/* Mobile grab handle */}
-        <div className="flex justify-center pt-2.5 sm:hidden">
-          <div className="h-1.5 w-12 rounded-full bg-slate-300" />
-        </div>
-
         {/* Header */}
-        <div className="flex items-start justify-between gap-3 border-b border-slate-100 px-5 pb-3 pt-3 sm:pt-4">
+        <div className="flex items-start justify-between gap-3 border-b border-brand-amber-soft/70 bg-brand-cream/60 px-5 pb-3.5 pt-4">
           <div className="min-w-0">
-            <h3 className="truncate text-base font-bold text-slate-900 sm:text-lg">
+            <h3
+              id={titleId}
+              className="truncate text-base font-extrabold text-brand-brown sm:text-lg"
+            >
               {title}
             </h3>
             {subtitle && (
-              <p className="mt-0.5 text-xs text-slate-500">{subtitle}</p>
+              <p id={subtitleId} className="mt-0.5 text-xs text-brand-brown/75">
+                {subtitle}
+              </p>
             )}
           </div>
           <button
             type="button"
-            onClick={onClose}
-            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-slate-100 text-slate-600 active:scale-95 hover:bg-slate-200"
+            onClick={() => onCloseRef.current()}
+            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-brand-cream-deep text-brand-brown transition hover:bg-brand-amber-soft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-orange active:scale-95"
             aria-label="Tutup"
           >
             <X className="h-5 w-5" />
@@ -73,7 +82,7 @@ export function BottomSheet({
 
         {/* Optional Sticky Footer */}
         {footer && (
-          <div className="border-t border-slate-100 bg-slate-50/90 px-5 py-3.5 pb-safe">
+          <div className="border-t border-brand-amber-soft/70 bg-brand-cream/80 px-5 py-3.5 pb-safe">
             {footer}
           </div>
         )}

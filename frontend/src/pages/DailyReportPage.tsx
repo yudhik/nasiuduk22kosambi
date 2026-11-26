@@ -1,11 +1,13 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   BarChart3,
   ChevronRight,
   Clock,
   Download,
   History,
+  Lock,
   RefreshCw,
+  RotateCcw,
   Save,
   TrendingUp,
 } from 'lucide-react';
@@ -79,6 +81,25 @@ function orderStatusBadge(status: OrderDetail['status']) {
   }
 }
 
+function parseNonNegativeInt(raw: string): number | null {
+  const trimmed = raw.trim();
+  if (trimmed === '') return null;
+  if (!/^\d+$/.test(trimmed)) return null;
+  const num = Number(trimmed);
+  return Number.isSafeInteger(num) && num >= 0 ? num : null;
+}
+
+function buildDraftsFromReport(rep: DailyReportResponse): Record<number, PhysicalDraft> {
+  const next: Record<number, PhysicalDraft> = {};
+  for (const row of rep.stock_reconciliation) {
+    next[row.stock_item_id] = {
+      physical: row.physical_stock === null ? '' : String(row.physical_stock),
+      notes: row.notes ?? '',
+    };
+  }
+  return next;
+}
+
 function formatDurationSeconds(secs: number | null): string {
   if (secs === null) return '—';
   if (secs < 60) return `${secs} dtk`;
@@ -104,7 +125,9 @@ export function DailyReportPage({ storeStatus, onToast }: DailyReportPageProps) 
   const [dirty, setDirty] = useState(false);
   const [loadingDaily, setLoadingDaily] = useState(true);
   const [savingOpname, setSavingOpname] = useState(false);
+  const [opnameError, setOpnameError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const dailyReqSeq = useRef(0);
 
   // === Performance Analytics State ===
   const [preset, setPreset] = useState<AnalyticsPreset>('7d');
@@ -112,37 +135,57 @@ export function DailyReportPage({ storeStatus, onToast }: DailyReportPageProps) 
   const [customTo, setCustomTo] = useState(todayLocalDate);
   const [analytics, setAnalytics] = useState<PerformanceAnalyticsResponse | null>(null);
   const [loadingAnalytics, setLoadingAnalytics] = useState(false);
+  const analyticsReqSeq = useRef(0);
+
+  const confirmDiscardDirty = useCallback(() => {
+    if (!dirty) return true;
+    return window.confirm('Ada perubahan opname stok yang belum disimpan. Buang perubahan?');
+  }, [dirty]);
+
+  const handleTabChange = (nextTab: ReportTab) => {
+    if (nextTab === tab) return;
+    if (tab === 'daily' && !confirmDiscardDirty()) return;
+    setDrilldown(null);
+    setError(null);
+    setTab(nextTab);
+  };
+
+  const handleDateChange = (nextDate: string) => {
+    if (!nextDate || nextDate === date) return;
+    if (!confirmDiscardDirty()) return;
+    setDrilldown(null);
+    setDate(nextDate);
+  };
 
   const loadDaily = useCallback(async () => {
+    const seq = ++dailyReqSeq.current;
     try {
       setLoadingDaily(true);
       setError(null);
+      setOpnameError(null);
       const [rep, movs, orders] = await Promise.all([
         api.getDailyReport(date),
         api.listStockMovements(date),
         api.listOrders(date),
       ]);
+      if (seq !== dailyReqSeq.current) return;
       setReport(rep);
       setMovements(movs);
       setDailyOrders(orders);
-
-      const initialDrafts: Record<number, PhysicalDraft> = {};
-      for (const row of rep.stock_reconciliation) {
-        initialDrafts[row.stock_item_id] = {
-          physical: row.physical_stock === null ? '' : String(row.physical_stock),
-          notes: row.notes ?? '',
-        };
-      }
-      setDrafts(initialDrafts);
+      setDrafts(buildDraftsFromReport(rep));
       setDirty(false);
     } catch (err) {
+      if (seq !== dailyReqSeq.current) return;
       setError(err instanceof Error ? err.message : 'Gagal memuat laporan harian');
     } finally {
-      setLoadingDaily(false);
+      if (seq === dailyReqSeq.current) {
+        setLoadingDaily(false);
+      }
     }
   }, [date]);
 
   const loadAnalytics = useCallback(async () => {
+    const seq = ++analyticsReqSeq.current;
     try {
       setLoadingAnalytics(true);
       setError(null);
@@ -151,11 +194,15 @@ export function DailyReportPage({ storeStatus, onToast }: DailyReportPageProps) 
         preset === 'custom' ? customFrom : undefined,
         preset === 'custom' ? customTo : undefined
       );
+      if (seq !== analyticsReqSeq.current) return;
       setAnalytics(data);
     } catch (err) {
+      if (seq !== analyticsReqSeq.current) return;
       setError(err instanceof Error ? err.message : 'Gagal memuat analitik performa');
     } finally {
-      setLoadingAnalytics(false);
+      if (seq === analyticsReqSeq.current) {
+        setLoadingAnalytics(false);
+      }
     }
   }, [preset, customFrom, customTo]);
 
@@ -169,26 +216,48 @@ export function DailyReportPage({ storeStatus, onToast }: DailyReportPageProps) 
 
   const isDayClosed = report?.store_status === 'CLOSED';
 
+  const handleResetOpname = () => {
+    if (!report) return;
+    setDrafts(buildDraftsFromReport(report));
+    setDirty(false);
+    setOpnameError(null);
+  };
+
   const handleSavePhysicalStock = async () => {
     if (!report) return;
+    const invalidRow = report.stock_reconciliation.find((row) => {
+      const raw = drafts[row.stock_item_id]?.physical.trim() ?? '';
+      return raw !== '' && parseNonNegativeInt(raw) === null;
+    });
+    if (invalidRow) {
+      const msg = `Stok fisik untuk "${invalidRow.stock_name}" harus berupa angka bulat 0 atau lebih.`;
+      setOpnameError(msg);
+      onToast('Input opname tidak valid', msg, 'error');
+      return;
+    }
+
     try {
       setSavingOpname(true);
+      setOpnameError(null);
       setError(null);
       const entries = report.stock_reconciliation.map((row) => {
         const draft = drafts[row.stock_item_id];
         const raw = draft?.physical.trim() ?? '';
         return {
           stock_item_id: row.stock_item_id,
-          physical_stock: raw === '' ? null : Number(raw),
+          physical_stock: raw === '' ? null : parseNonNegativeInt(raw),
           notes: draft?.notes ?? '',
         };
       });
       const updated = await api.updatePhysicalStock(date, entries);
       setReport(updated);
+      setDrafts(buildDraftsFromReport(updated));
       setDirty(false);
       onToast('Opname stok fisik disimpan', undefined, 'success');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Gagal menyimpan opname stok');
+      const msg = err instanceof Error ? err.message : 'Gagal menyimpan opname stok';
+      setOpnameError(msg);
+      onToast('Gagal menyimpan opname', msg, 'error');
     } finally {
       setSavingOpname(false);
     }
@@ -220,14 +289,20 @@ export function DailyReportPage({ storeStatus, onToast }: DailyReportPageProps) 
     <div className="space-y-4">
       {/* Top Switcher */}
       <div className="flex flex-wrap items-center justify-between gap-2.5">
-        <div className="inline-flex rounded-xl border border-brand-amber-soft bg-white p-1">
+        <div
+          role="tablist"
+          aria-label="Jenis laporan"
+          className="inline-flex rounded-xl border border-brand-amber-soft bg-white p-1"
+        >
           <button
             type="button"
-            onClick={() => setTab('daily')}
-            className={`inline-flex items-center gap-1.5 rounded-lg px-3.5 py-1.5 text-xs font-bold transition ${
+            role="tab"
+            aria-selected={tab === 'daily'}
+            onClick={() => handleTabChange('daily')}
+            className={`inline-flex h-9 items-center gap-1.5 rounded-lg px-3.5 text-xs font-bold transition ${
               tab === 'daily'
-                ? 'bg-brand-orange text-white'
-                : 'text-brand-brown/75 hover:bg-brand-cream'
+                ? 'bg-brand-orange-dark text-white'
+                : 'text-brand-brown/80 hover:bg-brand-cream'
             }`}
           >
             <TrendingUp className="h-3.5 w-3.5" />
@@ -235,11 +310,13 @@ export function DailyReportPage({ storeStatus, onToast }: DailyReportPageProps) 
           </button>
           <button
             type="button"
-            onClick={() => setTab('analytics')}
-            className={`inline-flex items-center gap-1.5 rounded-lg px-3.5 py-1.5 text-xs font-bold transition ${
+            role="tab"
+            aria-selected={tab === 'analytics'}
+            onClick={() => handleTabChange('analytics')}
+            className={`inline-flex h-9 items-center gap-1.5 rounded-lg px-3.5 text-xs font-bold transition ${
               tab === 'analytics'
-                ? 'bg-brand-orange text-white'
-                : 'text-brand-brown/75 hover:bg-brand-cream'
+                ? 'bg-brand-orange-dark text-white'
+                : 'text-brand-brown/80 hover:bg-brand-cream'
             }`}
           >
             <BarChart3 className="h-3.5 w-3.5" />
@@ -251,14 +328,21 @@ export function DailyReportPage({ storeStatus, onToast }: DailyReportPageProps) 
           <div className="flex flex-wrap items-center gap-2">
             <input
               type="date"
+              aria-label="Tanggal laporan harian"
               value={date}
-              onChange={(e) => setDate(e.target.value)}
-              className="h-10 rounded-xl border border-brand-amber-soft bg-white px-3 text-xs font-bold text-brand-brown focus:border-brand-orange focus:outline-none"
+              onChange={(e) => handleDateChange(e.target.value)}
+              className="h-10 rounded-xl border border-brand-amber bg-white px-3 text-xs font-bold text-brand-brown focus:border-brand-orange-dark focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-orange"
             />
             <button
               type="button"
-              onClick={() => void loadDaily()}
-              className="inline-flex h-10 items-center gap-1.5 rounded-xl border border-brand-amber-soft bg-white px-3 text-xs font-bold text-brand-brown hover:bg-brand-cream-deep"
+              aria-label="Muat ulang laporan harian"
+              title="Muat ulang"
+              onClick={() => {
+                if (!confirmDiscardDirty()) return;
+                setDrilldown(null);
+                void loadDaily();
+              }}
+              className="inline-flex h-10 items-center gap-1.5 rounded-xl border border-brand-amber bg-white px-3 text-xs font-bold text-brand-brown hover:bg-brand-cream-deep focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-orange"
             >
               <RefreshCw className={`h-4 w-4 ${loadingDaily ? 'animate-spin' : ''}`} />
             </button>
@@ -275,16 +359,41 @@ export function DailyReportPage({ storeStatus, onToast }: DailyReportPageProps) 
       </div>
 
       {error && (
-        <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-medium text-rose-700">
-          {error}
+        <div
+          role="alert"
+          className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-medium text-rose-700"
+        >
+          <span>{error}</span>
+          <button
+            type="button"
+            onClick={() => void (tab === 'daily' ? loadDaily() : loadAnalytics())}
+            className="inline-flex h-8 items-center gap-1 rounded-lg border border-rose-300 bg-white px-2.5 text-xs font-bold text-rose-700 hover:bg-rose-100"
+          >
+            <RefreshCw className="h-3.5 w-3.5" />
+            <span>Coba Lagi</span>
+          </button>
         </div>
       )}
 
       {/* ==================== TAB 1: DAILY REPORT ==================== */}
       {tab === 'daily' &&
-        (loadingDaily || !report ? (
-          <div className="rounded-2xl border border-brand-amber-soft bg-white p-10 text-center text-sm text-brand-brown/60">
+        (loadingDaily && !report ? (
+          <div className="rounded-2xl border border-brand-amber-soft bg-white p-10 text-center text-sm text-brand-brown/75">
             Memuat laporan harian...
+          </div>
+        ) : !report ? (
+          <div className="rounded-2xl border border-rose-200 bg-white p-8 text-center">
+            <p className="text-sm font-bold text-brand-brown">
+              Laporan harian untuk tanggal {date} gagal dimuat.
+            </p>
+            <button
+              type="button"
+              onClick={() => void loadDaily()}
+              className="mt-3 inline-flex h-10 items-center gap-1.5 rounded-xl bg-brand-orange-dark px-4 text-xs font-bold text-white hover:bg-brand-brown"
+            >
+              <RefreshCw className="h-4 w-4" />
+              <span>Muat Ulang</span>
+            </button>
           </div>
         ) : (
           <div className="space-y-4">
@@ -483,90 +592,286 @@ export function DailyReportPage({ storeStatus, onToast }: DailyReportPageProps) 
                   <h3 className="text-sm font-extrabold text-brand-brown">
                     Rekonsiliasi Stok Akhir Hari (Per Item Stok)
                   </h3>
-                  <p className="text-xs text-brand-brown/65">
+                  <p className="text-xs text-brand-brown/75">
                     Stok Awal + Restock − Terpakai = Sisa Sistem
                   </p>
                 </div>
-                {!isDayClosed && (
+                {isDayClosed ? (
+                  <span className="inline-flex items-center gap-1.5 rounded-full border border-rose-200 bg-rose-50 px-3 py-1 text-xs font-bold text-rose-700">
+                    <Lock className="h-3.5 w-3.5" />
+                    <span>Hari ditutup — opname terkunci</span>
+                  </span>
+                ) : (
+                  <div className="flex items-center gap-2">
+                    {dirty && (
+                      <button
+                        type="button"
+                        disabled={savingOpname}
+                        onClick={handleResetOpname}
+                        className="inline-flex h-10 items-center gap-1.5 rounded-xl border border-brand-amber bg-white px-3 text-xs font-bold text-brand-brown hover:bg-brand-cream-deep disabled:opacity-50"
+                      >
+                        <RotateCcw className="h-3.5 w-3.5" />
+                        <span>Batal</span>
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      disabled={!dirty || savingOpname}
+                      onClick={() => void handleSavePhysicalStock()}
+                      className="inline-flex h-10 items-center gap-1.5 rounded-xl bg-brand-orange-dark px-3.5 text-xs font-bold text-white hover:bg-brand-brown disabled:bg-stone-300"
+                    >
+                      <Save className="h-3.5 w-3.5" />
+                      <span>{savingOpname ? 'Menyimpan...' : 'Simpan Opname'}</span>
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {opnameError && (
+                <div
+                  role="alert"
+                  className="mb-3 rounded-xl border border-rose-200 bg-rose-50 px-3.5 py-2.5 text-xs font-semibold text-rose-700"
+                >
+                  {opnameError}
+                </div>
+              )}
+
+              {report.stock_reconciliation.length === 0 ? (
+                <p className="rounded-xl border border-dashed border-brand-amber-soft py-6 text-center text-xs text-brand-brown/75">
+                  Belum ada data stok pada tanggal {report.business_date}.
+                </p>
+              ) : (
+                <>
+                  {/* Mobile Stacked Opname Cards (< md) */}
+                  <div className="space-y-2.5 md:hidden">
+                    {report.stock_reconciliation.map((row) => {
+                      const d = drafts[row.stock_item_id];
+                      const raw = d?.physical ?? '';
+                      const parsed = parseNonNegativeInt(raw);
+                      const invalid = raw.trim() !== '' && parsed === null;
+                      const variance = parsed === null ? null : parsed - row.system_remaining;
+                      return (
+                        <div
+                          key={row.stock_item_id}
+                          className="rounded-xl border border-brand-amber-soft bg-brand-cream/40 p-3"
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0">
+                              <p className="text-xs font-extrabold text-brand-brown">
+                                {row.stock_name}{' '}
+                                <span className="font-semibold text-brand-brown/75">({row.unit})</span>
+                              </p>
+                              <p className="mt-0.5 text-[11px] tabular-nums text-brand-brown/75">
+                                Awal {row.initial_stock} • Restock {row.restocked_qty} • Terpakai {row.sold_qty}
+                              </p>
+                            </div>
+                            <span className="shrink-0 rounded-lg bg-white px-2 py-1 text-[11px] font-extrabold tabular-nums text-brand-brown ring-1 ring-brand-amber-soft">
+                              Sisa: {row.system_remaining}
+                            </span>
+                          </div>
+
+                          <div className="mt-2.5 flex items-center gap-2.5">
+                            <label className="flex flex-1 items-center gap-2 text-xs font-bold text-brand-brown">
+                              <span className="shrink-0">Fisik:</span>
+                              <input
+                                type="text"
+                                inputMode="numeric"
+                                pattern="[0-9]*"
+                                aria-label={`Stok fisik ${row.stock_name}`}
+                                disabled={isDayClosed}
+                                placeholder="0"
+                                value={raw}
+                                onChange={(e) => {
+                                  const cleaned = e.target.value.replace(/[^\d]/g, '');
+                                  setDrafts((prev) => ({
+                                    ...prev,
+                                    [row.stock_item_id]: {
+                                      physical: cleaned,
+                                      notes: prev[row.stock_item_id]?.notes ?? '',
+                                    },
+                                  }));
+                                  setDirty(true);
+                                  setOpnameError(null);
+                                }}
+                                className={`h-11 w-full rounded-xl border bg-white px-3 text-right text-sm font-extrabold tabular-nums text-brand-brown focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-orange disabled:bg-stone-100 ${
+                                  invalid ? 'border-rose-400' : 'border-brand-amber'
+                                }`}
+                              />
+                            </label>
+                            <div className="min-w-[84px] text-right text-xs font-extrabold tabular-nums">
+                              {invalid ? (
+                                <span className="text-rose-700">Tidak valid</span>
+                              ) : variance === null ? (
+                                <span className="text-brand-brown/70">Belum diisi</span>
+                              ) : variance === 0 ? (
+                                <span className="rounded-full bg-emerald-100 px-2 py-1 text-emerald-700">
+                                  Cocok (0)
+                                </span>
+                              ) : variance < 0 ? (
+                                <span className="rounded-full bg-rose-100 px-2 py-1 text-rose-700">
+                                  Kurang ({variance})
+                                </span>
+                              ) : (
+                                <span className="rounded-full bg-sky-100 px-2 py-1 text-sky-700">
+                                  Lebih (+{variance})
+                                </span>
+                              )}
+                            </div>
+                          </div>
+
+                          <input
+                            type="text"
+                            aria-label={`Catatan opname ${row.stock_name}`}
+                            disabled={isDayClosed}
+                            value={d?.notes ?? ''}
+                            onChange={(e) => {
+                              setDrafts((prev) => ({
+                                ...prev,
+                                [row.stock_item_id]: {
+                                  physical: prev[row.stock_item_id]?.physical ?? '',
+                                  notes: e.target.value,
+                                },
+                              }));
+                              setDirty(true);
+                            }}
+                            placeholder="Catatan selisih (opsional)"
+                            className="mt-2 h-10 w-full rounded-xl border border-brand-amber-soft bg-white px-3 text-xs text-brand-brown placeholder:text-brand-brown/60 focus:border-brand-orange-dark focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-orange disabled:bg-stone-100"
+                          />
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {/* Desktop Opname Table (md+) */}
+                  <div className="hidden overflow-x-auto md:block">
+                    <table className="min-w-full divide-y divide-brand-amber-soft/60 text-left text-xs tabular-nums">
+                      <thead className="bg-brand-cream text-[11px] font-bold uppercase text-brand-brown/80">
+                        <tr>
+                          <th className="sticky left-0 z-10 bg-brand-cream px-3 py-2.5">Item Stok</th>
+                          <th className="px-3 py-2.5 text-right">Awal</th>
+                          <th className="px-3 py-2.5 text-right">Restock</th>
+                          <th className="px-3 py-2.5 text-right">Terpakai</th>
+                          <th className="px-3 py-2.5 text-right">Sisa Sistem</th>
+                          <th className="px-3 py-2.5 text-right">Stok Fisik</th>
+                          <th className="px-3 py-2.5 text-right">Selisih</th>
+                          <th className="px-3 py-2.5">Catatan</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-brand-amber-soft/40">
+                        {report.stock_reconciliation.map((row) => {
+                          const d = drafts[row.stock_item_id];
+                          const raw = d?.physical ?? '';
+                          const parsed = parseNonNegativeInt(raw);
+                          const invalid = raw.trim() !== '' && parsed === null;
+                          const variance = parsed === null ? null : parsed - row.system_remaining;
+                          return (
+                            <tr key={row.stock_item_id}>
+                              <td className="sticky left-0 bg-white px-3 py-2 font-bold text-brand-brown">
+                                {row.stock_name}{' '}
+                                <span className="font-normal text-brand-brown/75">({row.unit})</span>
+                              </td>
+                              <td className="px-3 py-2 text-right">{row.initial_stock}</td>
+                              <td className="px-3 py-2 text-right">{row.restocked_qty}</td>
+                              <td className="px-3 py-2 text-right font-bold">{row.sold_qty}</td>
+                              <td className="px-3 py-2 text-right font-bold text-brand-brown">
+                                {row.system_remaining}
+                              </td>
+                              <td className="px-3 py-2 text-right">
+                                <input
+                                  type="text"
+                                  inputMode="numeric"
+                                  pattern="[0-9]*"
+                                  aria-label={`Stok fisik ${row.stock_name}`}
+                                  disabled={isDayClosed}
+                                  value={raw}
+                                  onChange={(e) => {
+                                    const cleaned = e.target.value.replace(/[^\d]/g, '');
+                                    setDrafts((prev) => ({
+                                      ...prev,
+                                      [row.stock_item_id]: {
+                                        physical: cleaned,
+                                        notes: prev[row.stock_item_id]?.notes ?? '',
+                                      },
+                                    }));
+                                    setDirty(true);
+                                    setOpnameError(null);
+                                  }}
+                                  className={`h-9 w-20 rounded-lg border bg-white px-2 text-right text-xs font-bold text-brand-brown focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-orange disabled:bg-stone-100 ${
+                                    invalid ? 'border-rose-400' : 'border-brand-amber'
+                                  }`}
+                                />
+                              </td>
+                              <td className="px-3 py-2 text-right font-bold">
+                                {invalid ? (
+                                  <span className="text-rose-700">Tidak valid</span>
+                                ) : variance === null ? (
+                                  <span className="text-brand-brown/70">—</span>
+                                ) : variance === 0 ? (
+                                  <span className="text-emerald-700">Cocok (0)</span>
+                                ) : variance < 0 ? (
+                                  <span className="text-rose-700">Kurang ({variance})</span>
+                                ) : (
+                                  <span className="text-sky-700">Lebih (+{variance})</span>
+                                )}
+                              </td>
+                              <td className="px-3 py-2">
+                                <input
+                                  type="text"
+                                  aria-label={`Catatan opname ${row.stock_name}`}
+                                  disabled={isDayClosed}
+                                  value={d?.notes ?? ''}
+                                  onChange={(e) => {
+                                    setDrafts((prev) => ({
+                                      ...prev,
+                                      [row.stock_item_id]: {
+                                        physical: prev[row.stock_item_id]?.physical ?? '',
+                                        notes: e.target.value,
+                                      },
+                                    }));
+                                    setDirty(true);
+                                  }}
+                                  placeholder="Opsional..."
+                                  className="h-9 w-36 rounded-lg border border-brand-amber-soft bg-white px-2 text-xs text-brand-brown placeholder:text-brand-brown/60 focus:border-brand-orange-dark focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-orange disabled:bg-stone-100"
+                                />
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              )}
+            </div>
+
+            {/* Sticky Unsaved Opname Bar */}
+            {dirty && !isDayClosed && (
+              <div className="sticky bottom-20 z-20 flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-brand-orange bg-brand-brown px-4 py-3 text-brand-cream shadow-lg md:bottom-4">
+                <p className="text-xs font-bold">
+                  Perubahan opname stok belum disimpan
+                </p>
+                <div className="flex items-center gap-2">
                   <button
                     type="button"
-                    disabled={!dirty || savingOpname}
+                    disabled={savingOpname}
+                    onClick={handleResetOpname}
+                    className="inline-flex h-10 items-center gap-1 rounded-xl border border-brand-cream/30 px-3 text-xs font-bold text-brand-cream hover:bg-brand-brown-dark disabled:opacity-50"
+                  >
+                    <RotateCcw className="h-3.5 w-3.5" />
+                    <span>Batal</span>
+                  </button>
+                  <button
+                    type="button"
+                    disabled={savingOpname}
                     onClick={() => void handleSavePhysicalStock()}
-                    className="inline-flex h-9 items-center gap-1.5 rounded-xl bg-brand-orange px-3.5 text-xs font-bold text-white hover:bg-brand-orange-dark disabled:bg-stone-300"
+                    className="inline-flex h-10 items-center gap-1.5 rounded-xl bg-brand-orange-dark px-4 text-xs font-extrabold text-white hover:bg-brand-orange disabled:opacity-50"
                   >
                     <Save className="h-3.5 w-3.5" />
                     <span>{savingOpname ? 'Menyimpan...' : 'Simpan Opname'}</span>
                   </button>
-                )}
+                </div>
               </div>
-
-              <div className="overflow-x-auto">
-                <table className="min-w-full divide-y divide-brand-amber-soft/60 text-left text-xs">
-                  <thead className="bg-brand-cream text-[11px] font-bold uppercase text-brand-brown/75">
-                    <tr>
-                      <th className="px-3 py-2.5">Item Stok</th>
-                      <th className="px-3 py-2.5 text-right">Awal</th>
-                      <th className="px-3 py-2.5 text-right">Restock</th>
-                      <th className="px-3 py-2.5 text-right">Terpakai</th>
-                      <th className="px-3 py-2.5 text-right">Sisa Sistem</th>
-                      <th className="px-3 py-2.5 text-right">Stok Fisik</th>
-                      <th className="px-3 py-2.5 text-right">Selisih</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-brand-amber-soft/40">
-                    {report.stock_reconciliation.map((row) => {
-                      const d = drafts[row.stock_item_id];
-                      const parsed = d && d.physical.trim() !== '' ? Number(d.physical) : null;
-                      const variance = parsed === null ? null : parsed - row.system_remaining;
-                      return (
-                        <tr key={row.stock_item_id}>
-                          <td className="px-3 py-2 font-bold text-brand-brown">
-                            {row.stock_name}{' '}
-                            <span className="font-normal text-brand-brown/55">({row.unit})</span>
-                          </td>
-                          <td className="px-3 py-2 text-right">{row.initial_stock}</td>
-                          <td className="px-3 py-2 text-right">{row.restocked_qty}</td>
-                          <td className="px-3 py-2 text-right font-bold">{row.sold_qty}</td>
-                          <td className="px-3 py-2 text-right font-bold text-brand-brown">
-                            {row.system_remaining}
-                          </td>
-                          <td className="px-3 py-2 text-right">
-                            <input
-                              type="number"
-                              min={0}
-                              disabled={isDayClosed}
-                              value={d?.physical ?? ''}
-                              onChange={(e) => {
-                                setDrafts((prev) => ({
-                                  ...prev,
-                                  [row.stock_item_id]: {
-                                    physical: e.target.value,
-                                    notes: prev[row.stock_item_id]?.notes ?? '',
-                                  },
-                                }));
-                                setDirty(true);
-                              }}
-                              className="h-8 w-20 rounded-lg border border-brand-amber-soft bg-white px-2 text-right text-xs font-bold text-brand-brown disabled:bg-stone-100"
-                            />
-                          </td>
-                          <td className="px-3 py-2 text-right font-bold">
-                            {variance === null ? (
-                              <span className="text-stone-400">—</span>
-                            ) : variance === 0 ? (
-                              <span className="text-emerald-700">Cocok (0)</span>
-                            ) : variance < 0 ? (
-                              <span className="text-rose-700">Kurang ({variance})</span>
-                            ) : (
-                              <span className="text-sky-700">Lebih (+{variance})</span>
-                            )}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            </div>
+            )}
 
             {/* Menu Sales Table */}
             {report.sales_by_menu.length > 0 && (
@@ -643,31 +948,37 @@ export function DailyReportPage({ storeStatus, onToast }: DailyReportPageProps) 
                 </span>
               </button>
               {showMovements && (
-                <div className="mt-3 max-h-72 overflow-y-auto divide-y divide-brand-amber-soft/40 text-xs">
-                  {movements.map((mv) => (
-                    <div key={mv.id} className="flex items-center justify-between gap-2 py-2">
-                      <div>
-                        <span className="font-bold text-brand-brown">{mv.stock_name}</span>
-                        <span className="ml-2 rounded bg-brand-cream-deep px-1.5 py-0.5 text-[10px] font-bold">
-                          {movementLabel(mv.movement_type)}
-                        </span>
-                        <p className="text-[11px] text-brand-brown/60">
-                          {formatTime(mv.created_at)} • {mv.note}
-                        </p>
+                movements.length === 0 ? (
+                  <p className="mt-3 py-4 text-center text-xs text-brand-brown/75">
+                    Belum ada mutasi stok tercatat pada tanggal ini.
+                  </p>
+                ) : (
+                  <div className="mt-3 max-h-72 overflow-y-auto divide-y divide-brand-amber-soft/40 text-xs">
+                    {movements.map((mv) => (
+                      <div key={mv.id} className="flex items-center justify-between gap-2 py-2">
+                        <div>
+                          <span className="font-bold text-brand-brown">{mv.stock_name}</span>
+                          <span className="ml-2 rounded bg-brand-cream-deep px-1.5 py-0.5 text-[10px] font-bold">
+                            {movementLabel(mv.movement_type)}
+                          </span>
+                          <p className="text-[11px] text-brand-brown/75">
+                            {formatTime(mv.created_at)} • {mv.note}
+                          </p>
+                        </div>
+                        <div className="text-right font-mono tabular-nums">
+                          <span
+                            className={`font-bold ${
+                              mv.qty_delta >= 0 ? 'text-emerald-700' : 'text-rose-700'
+                            }`}
+                          >
+                            {mv.qty_delta >= 0 ? `+${mv.qty_delta}` : mv.qty_delta}
+                          </span>
+                          <p className="text-[10px] text-brand-brown/75">Sisa: {mv.stock_after}</p>
+                        </div>
                       </div>
-                      <div className="text-right font-mono">
-                        <span
-                          className={`font-bold ${
-                            mv.qty_delta >= 0 ? 'text-emerald-700' : 'text-rose-700'
-                          }`}
-                        >
-                          {mv.qty_delta >= 0 ? `+${mv.qty_delta}` : mv.qty_delta}
-                        </span>
-                        <p className="text-[10px] text-brand-brown/55">Sisa: {mv.stock_after}</p>
-                      </div>
-                    </div>
-                  ))}
-                </div>
+                    ))}
+                  </div>
+                )
               )}
             </div>
           </div>
@@ -722,9 +1033,23 @@ export function DailyReportPage({ storeStatus, onToast }: DailyReportPageProps) 
             )}
           </div>
 
-          {loadingAnalytics || !analytics ? (
-            <div className="rounded-2xl border border-brand-amber-soft bg-white p-10 text-center text-sm text-brand-brown/60">
+          {loadingAnalytics && !analytics ? (
+            <div className="rounded-2xl border border-brand-amber-soft bg-white p-10 text-center text-sm text-brand-brown/75">
               Menghitung analitik performa...
+            </div>
+          ) : !analytics ? (
+            <div className="rounded-2xl border border-rose-200 bg-white p-8 text-center">
+              <p className="text-sm font-bold text-brand-brown">
+                Analitik performa gagal dimuat.
+              </p>
+              <button
+                type="button"
+                onClick={() => void loadAnalytics()}
+                className="mt-3 inline-flex h-10 items-center gap-1.5 rounded-xl bg-brand-orange-dark px-4 text-xs font-bold text-white hover:bg-brand-brown"
+              >
+                <RefreshCw className="h-4 w-4" />
+                <span>Muat Ulang</span>
+              </button>
             </div>
           ) : (
             <div className="space-y-4">
