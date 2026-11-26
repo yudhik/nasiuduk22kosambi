@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 
 use crate::{
     auth::{AuthUser, Role},
-    db::{begin_write_tx, get_store_day_status_tx, now_iso, parse_business_date},
+    db::{begin_write_tx, now_iso, parse_business_date},
     error::{AppError, AppResult},
     models::{
         CreateExpenseCategoryRequest, CreateExpenseRequest, DailyExpense, ExpenseCategory,
@@ -91,6 +91,33 @@ fn clean_notes(notes: Option<&str>) -> String {
     notes.unwrap_or("").trim().chars().take(500).collect()
 }
 
+/// Keeps cached `store_days` totals accurate when an Owner/Admin records, edits, or deletes
+/// an expense for a date whose store day has already been closed.
+async fn sync_closed_store_day_expenses(
+    conn: &mut sqlx::SqliteConnection,
+    business_date: &str,
+) -> AppResult<bool> {
+    let res = sqlx::query(
+        r#"
+        UPDATE store_days
+        SET
+            total_expenses = agg.total,
+            net_profit = gross_revenue - agg.total
+        FROM (
+            SELECT COALESCE(SUM(amount), 0) AS total
+            FROM daily_expenses
+            WHERE business_date = ?
+        ) AS agg
+        WHERE store_days.business_date = ? AND store_days.status = 'CLOSED'
+        "#,
+    )
+    .bind(business_date)
+    .bind(business_date)
+    .execute(&mut *conn)
+    .await?;
+    Ok(res.rows_affected() > 0)
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ExpenseQuery {
     pub date: Option<String>,
@@ -130,12 +157,6 @@ pub async fn create_expense(
     let now = now_iso();
 
     let mut tx = begin_write_tx(&state.pool).await?;
-    let store_status = get_store_day_status_tx(&mut tx, &business_date).await?;
-    if store_status == "CLOSED" {
-        return Err(AppError::Conflict(format!(
-            "Toko untuk tanggal {business_date} sudah ditutup. Pengeluaran tidak dapat ditambahkan lagi."
-        )));
-    }
     let category = resolve_category(&mut tx, req.category.as_deref(), None).await?;
 
     let res = sqlx::query(
@@ -157,12 +178,23 @@ pub async fn create_expense(
     .execute(&mut *tx)
     .await?;
 
+    let closed_day_synced = sync_closed_store_day_expenses(&mut tx, &business_date).await?;
+
     let created: DailyExpense = sqlx::query_as("SELECT * FROM daily_expenses WHERE id = ?")
         .bind(res.last_insert_rowid())
         .fetch_one(&mut *tx)
         .await?;
 
     tx.commit().await?;
+    tracing::info!(
+        actor = %auth.username,
+        expense_id = created.id,
+        business_date = %created.business_date,
+        category = %created.category,
+        amount = created.amount,
+        closed_day_synced,
+        "expense created"
+    );
     Ok((StatusCode::CREATED, Json(created)))
 }
 
@@ -183,20 +215,25 @@ pub async fn delete_expense(
     let existing = existing
         .ok_or_else(|| AppError::NotFound(format!("Pengeluaran #{id} tidak ditemukan")))?;
 
-    let store_status = get_store_day_status_tx(&mut tx, &existing.business_date).await?;
-    if store_status == "CLOSED" {
-        return Err(AppError::Conflict(format!(
-            "Toko untuk tanggal {} sudah ditutup. Pengeluaran tidak dapat dihapus.",
-            existing.business_date
-        )));
-    }
-
     sqlx::query("DELETE FROM daily_expenses WHERE id = ?")
         .bind(id)
         .execute(&mut *tx)
         .await?;
 
+    let closed_day_synced =
+        sync_closed_store_day_expenses(&mut tx, &existing.business_date).await?;
+
     tx.commit().await?;
+    tracing::info!(
+        actor = %auth.username,
+        expense_id = id,
+        business_date = %existing.business_date,
+        title = %existing.title,
+        category = %existing.category,
+        amount = existing.amount,
+        closed_day_synced,
+        "expense deleted"
+    );
     Ok(Json(json!({ "deleted": true })))
 }
 
@@ -211,6 +248,10 @@ pub async fn update_expense(
     let title = req.title.trim();
     validate_expense_fields(title, req.amount)?;
     let notes = clean_notes(req.notes.as_deref());
+    let requested_date = match req.business_date.as_deref() {
+        Some(raw) if !raw.trim().is_empty() => Some(parse_business_date(Some(raw))?),
+        _ => None,
+    };
 
     let mut tx = begin_write_tx(&state.pool).await?;
     let existing: Option<DailyExpense> =
@@ -221,20 +262,14 @@ pub async fn update_expense(
     let existing = existing
         .ok_or_else(|| AppError::NotFound(format!("Pengeluaran #{id} tidak ditemukan")))?;
 
-    let store_status = get_store_day_status_tx(&mut tx, &existing.business_date).await?;
-    if store_status == "CLOSED" {
-        return Err(AppError::Conflict(format!(
-            "Toko untuk tanggal {} sudah ditutup. Pengeluaran tidak dapat diubah.",
-            existing.business_date
-        )));
-    }
-
+    let next_date = requested_date.unwrap_or_else(|| existing.business_date.clone());
     let category =
         resolve_category(&mut tx, Some(&req.category), Some(&existing.category)).await?;
 
     sqlx::query(
-        "UPDATE daily_expenses SET title = ?, category = ?, amount = ?, notes = ? WHERE id = ?",
+        "UPDATE daily_expenses SET business_date = ?, title = ?, category = ?, amount = ?, notes = ? WHERE id = ?",
     )
+    .bind(&next_date)
     .bind(title)
     .bind(&category)
     .bind(req.amount)
@@ -243,23 +278,32 @@ pub async fn update_expense(
     .execute(&mut *tx)
     .await?;
 
+    let mut closed_day_synced =
+        sync_closed_store_day_expenses(&mut tx, &existing.business_date).await?;
+    if next_date != existing.business_date {
+        closed_day_synced |= sync_closed_store_day_expenses(&mut tx, &next_date).await?;
+    }
+
     let updated: DailyExpense = sqlx::query_as("SELECT * FROM daily_expenses WHERE id = ?")
         .bind(id)
         .fetch_one(&mut *tx)
         .await?;
 
+    tx.commit().await?;
     tracing::info!(
         actor = %auth.username,
         expense_id = id,
+        old_date = %existing.business_date,
+        new_date = %updated.business_date,
         old_title = %existing.title,
         old_category = %existing.category,
         old_amount = existing.amount,
         new_title = %updated.title,
         new_category = %updated.category,
         new_amount = updated.amount,
+        closed_day_synced,
         "expense updated"
     );
-    tx.commit().await?;
     Ok(Json(updated))
 }
 

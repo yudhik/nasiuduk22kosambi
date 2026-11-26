@@ -366,7 +366,8 @@ async fn test_multistock_store_lifecycle_channels_expenses_and_analytics() {
     let stocks: Vec<StockItem> = serde_json::from_value(stocks_val).unwrap();
     assert!(stocks.iter().all(|s| s.current_stock == 0));
 
-    // Reopening today must fail (409) and adding expenses after close must fail (409)
+    // Reopening today must fail (409), while expenses remain allowed regardless of store status
+    // and keep closed store_days totals synced.
     let (status, _, _) = send_json_with_cookie(
         &app,
         Method::POST,
@@ -377,15 +378,42 @@ async fn test_multistock_store_lifecycle_channels_expenses_and_analytics() {
     .await;
     assert_eq!(status, StatusCode::CONFLICT);
 
-    let (status, _, _) = send_json_with_cookie(
+    let (status, late_val, _) = send_json_with_cookie(
         &app,
         Method::POST,
         "/api/expenses",
         Some(&admin_cookie),
-        Some(json!({ "title": "Telat", "amount": 5000 })),
+        Some(json!({ "title": "Belanja Setelah Tutup", "amount": 5000 })),
     )
     .await;
-    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(status, StatusCode::CREATED);
+    let late_exp: DailyExpense = serde_json::from_value(late_val).unwrap();
+    let (_, st_val, _) =
+        send_json_with_cookie(&app, Method::GET, "/api/store/status", Some(&admin_cookie), None)
+            .await;
+    let st_after_late: StoreStatusResponse = serde_json::from_value(st_val).unwrap();
+    let late_summary = st_after_late.closing_summary.unwrap();
+    assert_eq!(late_summary.total_expenses, 27000);
+    assert_eq!(late_summary.net_profit, 63000);
+
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::DELETE,
+        &format!("/api/expenses/{}", late_exp.id),
+        Some(&admin_cookie),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, st_val, _) =
+        send_json_with_cookie(&app, Method::GET, "/api/store/status", Some(&admin_cookie), None)
+            .await;
+    let restored_summary = serde_json::from_value::<StoreStatusResponse>(st_val)
+        .unwrap()
+        .closing_summary
+        .unwrap();
+    assert_eq!(restored_summary.total_expenses, 22000);
+    assert_eq!(restored_summary.net_profit, 68000);
 
     // 10. Verify Daily Report & Performance Analytics (preset=today)
     let (status, rep_val, _) = send_json_with_cookie(
@@ -1316,7 +1344,7 @@ async fn test_expense_categories_and_editable_expenses() {
         assert_eq!(status, StatusCode::FORBIDDEN);
     }
 
-    // 8. Closed days are locked for edits
+    // 8. Closed days still allow editing/creating expenses and keep closing_summary synced
     let stock = create_stock(&app, &admin_cookie, "Nasi Uduk", "porsi").await;
     let (status, _, _) = send_json_with_cookie(
         &app,
@@ -1336,13 +1364,46 @@ async fn test_expense_categories_and_editable_expenses() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+    // Malformed business_date on edit is rejected with 400
     let (status, _, _) = send_json_with_cookie(
         &app,
         Method::PUT,
         &edit_uri,
         Some(&admin_cookie),
-        Some(json!({ "title": "x", "category": "Kemasan", "amount": 100 })),
+        Some(json!({
+            "business_date": "not-a-date",
+            "title": "Koreksi tanggal",
+            "category": "Kemasan",
+            "amount": 12000
+        })),
     )
     .await;
-    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (status, upd_closed, _) = send_json_with_cookie(
+        &app,
+        Method::PUT,
+        &edit_uri,
+        Some(&admin_cookie),
+        Some(json!({
+            "business_date": "2020-01-15",
+            "title": "Koreksi tanggal",
+            "category": "Kemasan",
+            "amount": 12000
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(upd_closed["business_date"], "2020-01-15");
+    assert_eq!(upd_closed["amount"], 12000);
+    // Moving that expense off today updated today's closed store_days.total_expenses (only the 3000 default remains)
+    let (_, st_val, _) =
+        send_json_with_cookie(&app, Method::GET, "/api/store/status", Some(&admin_cookie), None)
+            .await;
+    let st_closed = serde_json::from_value::<StoreStatusResponse>(st_val)
+        .unwrap()
+        .closing_summary
+        .unwrap();
+    assert_eq!(st_closed.total_expenses, 3000);
+    assert_eq!(st_closed.net_profit, -3000);
 }

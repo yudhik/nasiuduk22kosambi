@@ -224,6 +224,7 @@ pub struct CreateExpenseRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateExpenseRequest {
+    pub business_date: Option<String>,
     pub title: String,
     pub category: String,
     pub amount: i64,

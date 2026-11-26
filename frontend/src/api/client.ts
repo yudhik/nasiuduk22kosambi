@@ -265,7 +265,13 @@ export const api = {
 
   updateExpense: (
     id: number,
-    payload: { title: string; category: string; amount: number; notes?: string }
+    payload: {
+      business_date?: string;
+      title: string;
+      category: string;
+      amount: number;
+      notes?: string;
+    }
   ) =>
     request<DailyExpense>(`/api/expenses/${id}`, {
       method: 'PUT',
