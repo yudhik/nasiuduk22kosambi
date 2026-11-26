@@ -177,7 +177,7 @@ export const api = {
     }),
 
   deleteStock: (id: number) =>
-    request<{ deleted: boolean; soft_deleted: boolean }>(`/api/stocks/${id}`, {
+    request<{ deleted: boolean; soft_deleted: boolean; reason?: string }>(`/api/stocks/${id}`, {
       method: 'DELETE',
     }),
 
@@ -210,7 +210,7 @@ export const api = {
     }),
 
   deleteMenu: (id: number) =>
-    request<{ deleted: boolean; soft_deleted: boolean }>(`/api/menus/${id}`, {
+    request<{ deleted: boolean; soft_deleted: boolean; reason?: string }>(`/api/menus/${id}`, {
       method: 'DELETE',
     }),
 

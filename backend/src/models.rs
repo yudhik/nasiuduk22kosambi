@@ -83,7 +83,10 @@ pub struct CreateMenuRequest {
     pub name: String,
     pub category: Option<String>,
     pub price: i64,
+    #[serde(default)]
     pub stock_requirements: Vec<MenuStockRequirementInput>,
+    #[serde(default)]
+    pub create_self_stock_qty: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -519,7 +519,10 @@ async fn test_unified_login_rbac_paid_void_rules_and_session_timestamps() {
 
     let (_, owner_val, owner_cookie) = login_request(&app, "pemilik1", "password123").await;
     let owner_me: AuthUserResponse = serde_json::from_value(owner_val).unwrap();
-    assert_eq!(owner_me.allowed_tabs, vec!["waiter", "cashier", "menu", "report"]);
+    assert_eq!(
+        owner_me.allowed_tabs,
+        vec!["waiter", "cashier", "menu", "expenses", "report"]
+    );
     let owner_cookie = owner_cookie.unwrap();
 
     // Owner gets 403 on admin endpoint

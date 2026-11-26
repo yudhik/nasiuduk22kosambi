@@ -40,6 +40,7 @@ export interface CreateMenuPayload {
   category?: string;
   price: number;
   stock_requirements: MenuStockRequirementInput[];
+  create_self_stock_qty?: number;
 }
 
 export interface UpdateMenuPayload {
@@ -295,7 +296,7 @@ export interface PerformanceAnalyticsResponse {
 
 export type UserRole = 'admin' | 'owner' | 'cashier' | 'waiter';
 
-export type TabKey = 'waiter' | 'cashier' | 'menu' | 'report' | 'users';
+export type TabKey = 'waiter' | 'cashier' | 'menu' | 'expenses' | 'report' | 'users';
 
 export interface AuthUser {
   id: number;

@@ -4,13 +4,9 @@ import {
   Clock,
   Download,
   History,
-  Lock,
-  Plus,
   RefreshCw,
   Save,
-  Trash2,
   TrendingUp,
-  Wallet,
 } from 'lucide-react';
 import { api } from '../api/client';
 import type { ToastMessage } from '../components/ToastContainer';
@@ -34,8 +30,6 @@ interface PhysicalDraft {
 }
 
 type ReportTab = 'daily' | 'analytics';
-
-const EXPENSE_CATEGORIES = ['Bahan Baku', 'Gas / Listrik', 'Kemasan', 'Operasional', 'Lainnya'];
 
 function formatDurationSeconds(secs: number | null): string {
   if (secs === null) return '—';
@@ -61,13 +55,6 @@ export function DailyReportPage({ storeStatus, onToast }: DailyReportPageProps) 
   const [loadingDaily, setLoadingDaily] = useState(true);
   const [savingOpname, setSavingOpname] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  // Daily Expense Form
-  const [expTitle, setExpTitle] = useState('');
-  const [expCategory, setExpCategory] = useState('Bahan Baku');
-  const [expAmount, setExpAmount] = useState('');
-  const [expNotes, setExpNotes] = useState('');
-  const [savingExp, setSavingExp] = useState(false);
 
   // === Performance Analytics State ===
   const [preset, setPreset] = useState<AnalyticsPreset>('7d');
@@ -129,47 +116,6 @@ export function DailyReportPage({ storeStatus, onToast }: DailyReportPageProps) 
   }, [tab, loadDaily, loadAnalytics, storeStatus?.status]);
 
   const isDayClosed = report?.store_status === 'CLOSED';
-
-  const handleAddExpense = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const amt = Number(expAmount);
-    if (!expTitle.trim() || Number.isNaN(amt) || amt <= 0) {
-      setError('Isi nama pengeluaran dan nominal lebih dari 0.');
-      return;
-    }
-    try {
-      setSavingExp(true);
-      setError(null);
-      await api.createExpense({
-        business_date: date,
-        title: expTitle.trim(),
-        category: expCategory,
-        amount: amt,
-        notes: expNotes.trim() || undefined,
-      });
-      setExpTitle('');
-      setExpAmount('');
-      setExpNotes('');
-      onToast('Pengeluaran tercatat', `${expTitle.trim()} • ${formatRupiah(amt)}`, 'success');
-      await loadDaily();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Gagal menambah pengeluaran');
-    } finally {
-      setSavingExp(false);
-    }
-  };
-
-  const handleDeleteExpense = async (id: number, title: string) => {
-    if (!window.confirm(`Hapus pengeluaran "${title}"?`)) return;
-    try {
-      setError(null);
-      await api.deleteExpense(id);
-      onToast(`Pengeluaran "${title}" dihapus`, undefined, 'info');
-      await loadDaily();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Gagal menghapus pengeluaran');
-    }
-  };
 
   const handleSavePhysicalStock = async () => {
     if (!report) return;
@@ -370,109 +316,6 @@ export function DailyReportPage({ storeStatus, onToast }: DailyReportPageProps) 
                         Lunas: {formatRupiah(ch.paid_revenue)}
                         {ch.unpaid_count > 0 ? ` • Belum: ${ch.unpaid_count}` : ''}
                       </p>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            {/* Daily Expenses Recording & List */}
-            <div className="rounded-2xl border border-brand-amber-soft bg-white p-4 shadow-sm">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div className="flex items-center gap-2">
-                  <Wallet className="h-4 w-4 text-brand-orange" />
-                  <h3 className="text-sm font-extrabold text-brand-brown">
-                    Pengeluaran Harian ({formatRupiah(report.revenue.total_expenses)})
-                  </h3>
-                </div>
-                {isDayClosed && (
-                  <span className="inline-flex items-center gap-1 rounded-full bg-rose-100 px-2.5 py-0.5 text-[11px] font-bold text-rose-700">
-                    <Lock className="h-3 w-3" />
-                    Terkunci (Toko Sudah Tutup)
-                  </span>
-                )}
-              </div>
-
-              {!isDayClosed && (
-                <form
-                  onSubmit={handleAddExpense}
-                  className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-12"
-                >
-                  <input
-                    type="text"
-                    value={expTitle}
-                    onChange={(e) => setExpTitle(e.target.value)}
-                    placeholder="Keterangan (cth: Beli ayam 5kg / Gas 3kg)"
-                    className="h-10 rounded-xl border border-brand-amber-soft px-3 text-xs text-brand-brown focus:border-brand-orange focus:outline-none sm:col-span-4"
-                  />
-                  <select
-                    value={expCategory}
-                    onChange={(e) => setExpCategory(e.target.value)}
-                    className="h-10 rounded-xl border border-brand-amber-soft bg-white px-2.5 text-xs font-semibold text-brand-brown sm:col-span-2"
-                  >
-                    {EXPENSE_CATEGORIES.map((c) => (
-                      <option key={c} value={c}>
-                        {c}
-                      </option>
-                    ))}
-                  </select>
-                  <input
-                    type="number"
-                    min={1}
-                    value={expAmount}
-                    onChange={(e) => setExpAmount(e.target.value)}
-                    placeholder="Nominal (Rp)"
-                    className="h-10 rounded-xl border border-brand-amber-soft px-3 text-xs font-bold text-brand-brown focus:border-brand-orange focus:outline-none sm:col-span-2"
-                  />
-                  <input
-                    type="text"
-                    value={expNotes}
-                    onChange={(e) => setExpNotes(e.target.value)}
-                    placeholder="Catatan (opsional)"
-                    className="h-10 rounded-xl border border-brand-amber-soft px-3 text-xs text-brand-brown focus:border-brand-orange focus:outline-none sm:col-span-2"
-                  />
-                  <button
-                    type="submit"
-                    disabled={savingExp}
-                    className="inline-flex h-10 items-center justify-center gap-1 rounded-xl bg-brand-orange px-3 text-xs font-bold text-white hover:bg-brand-orange-dark disabled:opacity-60 sm:col-span-2"
-                  >
-                    <Plus className="h-4 w-4" />
-                    <span>Catat</span>
-                  </button>
-                </form>
-              )}
-
-              {report.expenses.length > 0 && (
-                <div className="mt-3 divide-y divide-brand-amber-soft/50 rounded-xl border border-brand-amber-soft/70">
-                  {report.expenses.map((ex) => (
-                    <div
-                      key={ex.id}
-                      className="flex flex-wrap items-center justify-between gap-2 px-3 py-2.5 text-xs"
-                    >
-                      <div>
-                        <span className="font-bold text-brand-brown">{ex.title}</span>
-                        <span className="ml-2 rounded-md bg-brand-cream-deep px-1.5 py-0.5 text-[10px] font-semibold text-brand-brown">
-                          {ex.category}
-                        </span>
-                        {ex.notes && (
-                          <p className="text-[11px] text-brand-brown/60">{ex.notes}</p>
-                        )}
-                      </div>
-                      <div className="flex items-center gap-2.5">
-                        <span className="font-extrabold text-rose-700">
-                          -{formatRupiah(ex.amount)}
-                        </span>
-                        {!isDayClosed && (
-                          <button
-                            type="button"
-                            onClick={() => void handleDeleteExpense(ex.id, ex.title)}
-                            className="rounded-lg p-1 text-rose-600 hover:bg-rose-50"
-                            aria-label="Hapus pengeluaran"
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                          </button>
-                        )}
-                      </div>
                     </div>
                   ))}
                 </div>

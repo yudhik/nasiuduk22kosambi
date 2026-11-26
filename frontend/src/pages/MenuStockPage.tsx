@@ -10,6 +10,7 @@ import {
   Layers,
   PackagePlus,
   Plus,
+  RotateCcw,
   Search,
   SlidersHorizontal,
   Store,
@@ -37,6 +38,8 @@ interface MenuStockPageProps {
 }
 
 type SectionTab = 'menus' | 'stocks' | 'channels';
+
+const SELF_STOCK_ID = -1;
 
 interface MathChallenge {
   a: number;
@@ -70,6 +73,8 @@ export function MenuStockPage({
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [selectedCategory, setSelectedCategory] = useState('Semua');
+  const [showInactiveMenus, setShowInactiveMenus] = useState(false);
+  const [showInactiveStocks, setShowInactiveStocks] = useState(false);
 
   // Open Store modal
   const [openStoreModal, setOpenStoreModal] = useState(false);
@@ -148,22 +153,38 @@ export function MenuStockPage({
   }, [loadAll]);
 
   const activeStocks = useMemo(() => stocks.filter((s) => s.is_active === 1), [stocks]);
+  const inactiveStocksCount = useMemo(
+    () => stocks.filter((s) => s.is_active === 0).length,
+    [stocks]
+  );
+  const visibleStocks = useMemo(
+    () => (showInactiveStocks ? stocks : activeStocks),
+    [stocks, activeStocks, showInactiveStocks]
+  );
+
+  const activeMenusCount = useMemo(() => menus.filter((m) => m.is_active === 1).length, [menus]);
+  const inactiveMenusCount = useMemo(
+    () => menus.filter((m) => m.is_active === 0).length,
+    [menus]
+  );
 
   const categories = useMemo(() => {
-    const set = new Set(menus.map((m) => m.category));
+    const source = showInactiveMenus ? menus : menus.filter((m) => m.is_active === 1);
+    const set = new Set(source.map((m) => m.category));
     return ['Semua', ...Array.from(set)];
-  }, [menus]);
+  }, [menus, showInactiveMenus]);
 
   const filteredMenus = useMemo(() => {
     const q = search.trim().toLowerCase();
     return menus.filter((m) => {
+      if (!showInactiveMenus && m.is_active === 0) return false;
       if (selectedCategory !== 'Semua' && m.category !== selectedCategory) return false;
       if (q && !m.name.toLowerCase().includes(q) && !m.category.toLowerCase().includes(q)) {
         return false;
       }
       return true;
     });
-  }, [menus, search, selectedCategory]);
+  }, [menus, search, selectedCategory, showInactiveMenus]);
 
   // === OPEN / CLOSE STORE ===
   const triggerOpenStoreSheet = () => {
@@ -252,9 +273,7 @@ export function MenuStockPage({
     setMenuCategory('Makanan');
     setMenuPrice('');
     setMenuActive(true);
-    setMenuReqs(
-      activeStocks.length > 0 ? [{ stock_item_id: activeStocks[0].id, qty_per_unit: 1 }] : []
-    );
+    setMenuReqs([{ stock_item_id: SELF_STOCK_ID, qty_per_unit: 1 }]);
     setError(null);
     setShowMenuForm(true);
   };
@@ -277,6 +296,10 @@ export function MenuStockPage({
 
   const addStockReqRow = () => {
     const usedIds = new Set(menuReqs.map((r) => r.stock_item_id));
+    if (!editingMenu && !usedIds.has(SELF_STOCK_ID)) {
+      setMenuReqs((prev) => [...prev, { stock_item_id: SELF_STOCK_ID, qty_per_unit: 1 }]);
+      return;
+    }
     const nextStock = activeStocks.find((s) => !usedIds.has(s.id));
     if (!nextStock) return;
     setMenuReqs((prev) => [...prev, { stock_item_id: nextStock.id, qty_per_unit: 1 }]);
@@ -301,17 +324,23 @@ export function MenuStockPage({
           category: menuCategory.trim() || 'Makanan',
           price: parsedPrice,
           is_active: menuActive,
-          stock_requirements: menuReqs,
+          stock_requirements: menuReqs.filter((r) => r.stock_item_id !== SELF_STOCK_ID),
         });
         onToast(`Menu "${menuName.trim()}" diperbarui`);
       } else {
+        const selfReq = menuReqs.find((r) => r.stock_item_id === SELF_STOCK_ID);
+        const existingReqs = menuReqs.filter((r) => r.stock_item_id !== SELF_STOCK_ID);
         await api.createMenu({
           name: menuName.trim(),
           category: menuCategory.trim() || 'Makanan',
           price: parsedPrice,
-          stock_requirements: menuReqs,
+          stock_requirements: existingReqs,
+          create_self_stock_qty: selfReq?.qty_per_unit,
         });
-        onToast(`Menu "${menuName.trim()}" ditambahkan`);
+        onToast(
+          `Menu "${menuName.trim()}" ditambahkan`,
+          selfReq ? `Item stok "${menuName.trim()}" otomatis dibuat & dihubungkan.` : undefined
+        );
       }
       setShowMenuForm(false);
       await loadAll();
@@ -323,15 +352,36 @@ export function MenuStockPage({
   const handleDeleteMenu = async (menu: MenuItem) => {
     if (!window.confirm(`Hapus menu "${menu.name}"?`)) return;
     try {
+      setError(null);
       const res = await api.deleteMenu(menu.id);
       onToast(
-        res.soft_deleted ? `Menu "${menu.name}" dinonaktifkan` : `Menu "${menu.name}" dihapus`,
-        undefined,
+        res.soft_deleted ? `Menu "${menu.name}" diarsipkan` : `Menu "${menu.name}" dihapus`,
+        res.reason,
         'info'
       );
       await loadAll();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Gagal menghapus menu');
+    }
+  };
+
+  const handleReactivateMenu = async (menu: MenuItem) => {
+    try {
+      setError(null);
+      await api.updateMenu(menu.id, {
+        name: menu.name,
+        category: menu.category,
+        price: menu.price,
+        is_active: true,
+        stock_requirements: menu.stock_requirements.map((r) => ({
+          stock_item_id: r.stock_item_id,
+          qty_per_unit: r.qty_per_unit,
+        })),
+      });
+      onToast(`Menu "${menu.name}" diaktifkan kembali`, undefined, 'success');
+      await loadAll();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Gagal mengaktifkan menu');
     }
   };
 
@@ -398,15 +448,31 @@ export function MenuStockPage({
   const handleDeleteStock = async (stock: StockItem) => {
     if (!window.confirm(`Hapus item stok "${stock.name}"?`)) return;
     try {
+      setError(null);
       const res = await api.deleteStock(stock.id);
       onToast(
-        res.soft_deleted ? `Stok "${stock.name}" dinonaktifkan` : `Stok "${stock.name}" dihapus`,
-        undefined,
+        res.soft_deleted ? `Stok "${stock.name}" diarsipkan` : `Stok "${stock.name}" dihapus`,
+        res.reason,
         'info'
       );
       await loadAll();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Gagal menghapus item stok');
+    }
+  };
+
+  const handleReactivateStock = async (stock: StockItem) => {
+    try {
+      setError(null);
+      await api.updateStock(stock.id, {
+        name: stock.name,
+        unit: stock.unit,
+        is_active: true,
+      });
+      onToast(`Stok "${stock.name}" diaktifkan kembali`, undefined, 'success');
+      await loadAll();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Gagal mengaktifkan item stok');
     }
   };
 
@@ -569,7 +635,7 @@ export function MenuStockPage({
             }`}
           >
             <Layers className="h-3.5 w-3.5" />
-            <span>Menu ({menus.length})</span>
+            <span>Menu ({activeMenusCount})</span>
           </button>
           <button
             type="button"
@@ -581,7 +647,7 @@ export function MenuStockPage({
             }`}
           >
             <Boxes className="h-3.5 w-3.5" />
-            <span>Stok Harian ({stocks.length})</span>
+            <span>Stok Harian ({activeStocks.length})</span>
           </button>
           <button
             type="button"
@@ -676,7 +742,7 @@ export function MenuStockPage({
                 className="h-10 w-full rounded-xl border border-brand-amber-soft bg-white pl-10 pr-3 text-sm text-brand-brown focus:border-brand-orange focus:outline-none"
               />
             </div>
-            <div className="no-scrollbar flex flex-nowrap gap-1.5 overflow-x-auto">
+            <div className="no-scrollbar flex flex-nowrap items-center gap-1.5 overflow-x-auto">
               {categories.map((cat) => (
                 <button
                   key={cat}
@@ -691,6 +757,21 @@ export function MenuStockPage({
                   {cat}
                 </button>
               ))}
+              {inactiveMenusCount > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setShowInactiveMenus((v) => !v)}
+                  className={`h-10 shrink-0 rounded-xl px-3 text-xs font-bold ${
+                    showInactiveMenus
+                      ? 'bg-stone-700 text-white'
+                      : 'bg-stone-100 text-stone-600 hover:bg-stone-200'
+                  }`}
+                >
+                  {showInactiveMenus
+                    ? `Sembunyikan Arsip (${inactiveMenusCount})`
+                    : `Arsip (${inactiveMenusCount})`}
+                </button>
+              )}
             </div>
           </div>
 
@@ -744,14 +825,26 @@ export function MenuStockPage({
                       >
                         <Edit2 className="h-4 w-4" />
                       </button>
-                      <button
-                        type="button"
-                        onClick={() => void handleDeleteMenu(menu)}
-                        className="flex h-9 w-9 items-center justify-center rounded-xl border border-rose-200 text-rose-600 hover:bg-rose-50"
-                        aria-label="Hapus menu"
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </button>
+                      {menu.is_active === 1 ? (
+                        <button
+                          type="button"
+                          onClick={() => void handleDeleteMenu(menu)}
+                          className="flex h-9 w-9 items-center justify-center rounded-xl border border-rose-200 text-rose-600 hover:bg-rose-50"
+                          aria-label="Hapus menu"
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => void handleReactivateMenu(menu)}
+                          className="inline-flex h-9 items-center gap-1 rounded-xl border border-emerald-200 bg-emerald-50 px-2.5 text-xs font-bold text-emerald-700 hover:bg-emerald-100"
+                          aria-label="Aktifkan kembali menu"
+                        >
+                          <RotateCcw className="h-3.5 w-3.5" />
+                          <span>Aktifkan</span>
+                        </button>
+                      )}
                     </div>
                   </div>
 
@@ -779,88 +872,120 @@ export function MenuStockPage({
 
       {/* SECTION 2: STOCK ITEMS */}
       {section === 'stocks' && (
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-          {stocks.map((stock) => (
-            <div
-              key={stock.id}
-              className={`rounded-2xl border bg-white p-4 shadow-sm ${
-                stock.is_active === 0 ? 'border-stone-200 opacity-60' : 'border-brand-amber-soft'
-              }`}
-            >
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <div className="flex items-center gap-2">
-                    <h3 className="text-sm font-extrabold text-brand-brown">{stock.name}</h3>
-                    <span className="rounded-md bg-brand-cream-deep px-2 py-0.5 text-[11px] font-semibold text-brand-brown/80">
-                      {stock.unit}
-                    </span>
-                    {stock.is_active === 0 && (
-                      <span className="rounded-full bg-stone-200 px-2 py-0.5 text-[10px] font-bold text-stone-600">
-                        Nonaktif
+        <div className="space-y-3">
+          {inactiveStocksCount > 0 && (
+            <div className="flex justify-end">
+              <button
+                type="button"
+                onClick={() => setShowInactiveStocks((v) => !v)}
+                className={`h-9 rounded-xl px-3 text-xs font-bold ${
+                  showInactiveStocks
+                    ? 'bg-stone-700 text-white'
+                    : 'bg-stone-100 text-stone-600 hover:bg-stone-200'
+                }`}
+              >
+                {showInactiveStocks
+                  ? `Sembunyikan Stok Arsip (${inactiveStocksCount})`
+                  : `Tampilkan Stok Arsip (${inactiveStocksCount})`}
+              </button>
+            </div>
+          )}
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+            {visibleStocks.map((stock) => (
+              <div
+                key={stock.id}
+                className={`rounded-2xl border bg-white p-4 shadow-sm ${
+                  stock.is_active === 0 ? 'border-stone-200 opacity-60' : 'border-brand-amber-soft'
+                }`}
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <h3 className="text-sm font-extrabold text-brand-brown">{stock.name}</h3>
+                      <span className="rounded-md bg-brand-cream-deep px-2 py-0.5 text-[11px] font-semibold text-brand-brown/80">
+                        {stock.unit}
                       </span>
+                      {stock.is_active === 0 && (
+                        <span className="rounded-full bg-stone-200 px-2 py-0.5 text-[10px] font-bold text-stone-600">
+                          Arsip
+                        </span>
+                      )}
+                    </div>
+                    <p className="mt-1 text-xl font-extrabold text-brand-orange">
+                      {stock.current_stock}{' '}
+                      <span className="text-xs font-semibold text-brand-brown/60">{stock.unit}</span>
+                    </p>
+                  </div>
+
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditingStock(stock);
+                        setStockName(stock.name);
+                        setStockUnit(stock.unit);
+                        setStockActive(stock.is_active === 1);
+                        setError(null);
+                        setStockFormOpen(true);
+                      }}
+                      className="flex h-9 w-9 items-center justify-center rounded-xl border border-brand-amber-soft text-brand-brown hover:bg-brand-cream-deep"
+                    >
+                      <Edit2 className="h-4 w-4" />
+                    </button>
+                    {stock.is_active === 1 ? (
+                      <button
+                        type="button"
+                        onClick={() => void handleDeleteStock(stock)}
+                        className="flex h-9 w-9 items-center justify-center rounded-xl border border-rose-200 text-rose-600 hover:bg-rose-50"
+                        aria-label="Hapus item stok"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => void handleReactivateStock(stock)}
+                        className="inline-flex h-9 items-center gap-1 rounded-xl border border-emerald-200 bg-emerald-50 px-2.5 text-xs font-bold text-emerald-700 hover:bg-emerald-100"
+                        aria-label="Aktifkan kembali stok"
+                      >
+                        <RotateCcw className="h-3.5 w-3.5" />
+                        <span>Aktifkan</span>
+                      </button>
                     )}
                   </div>
-                  <p className="mt-1 text-xl font-extrabold text-brand-orange">
-                    {stock.current_stock}{' '}
-                    <span className="text-xs font-semibold text-brand-brown/60">{stock.unit}</span>
-                  </p>
                 </div>
 
-                <div className="flex items-center gap-1.5">
+                <div className="mt-3 flex flex-wrap gap-2 border-t border-brand-amber-soft/50 pt-3">
                   <button
                     type="button"
+                    disabled={!isStoreOpen || stock.is_active === 0}
                     onClick={() => {
-                      setEditingStock(stock);
-                      setStockName(stock.name);
-                      setStockUnit(stock.unit);
-                      setStockActive(stock.is_active === 1);
-                      setError(null);
-                      setStockFormOpen(true);
+                      setStockAdjustModal({ mode: 'restock', stock });
+                      setStockAdjustVal('');
+                      setStockAdjustNote('');
                     }}
-                    className="flex h-9 w-9 items-center justify-center rounded-xl border border-brand-amber-soft text-brand-brown hover:bg-brand-cream-deep"
+                    className="inline-flex h-9 flex-1 items-center justify-center gap-1.5 rounded-xl bg-brand-orange px-3 text-xs font-bold text-white hover:bg-brand-orange-dark disabled:bg-stone-300"
                   >
-                    <Edit2 className="h-4 w-4" />
+                    <PackagePlus className="h-3.5 w-3.5" />
+                    <span>Restock</span>
                   </button>
                   <button
                     type="button"
-                    onClick={() => void handleDeleteStock(stock)}
-                    className="flex h-9 w-9 items-center justify-center rounded-xl border border-rose-200 text-rose-600 hover:bg-rose-50"
+                    disabled={!isStoreOpen || stock.is_active === 0}
+                    onClick={() => {
+                      setStockAdjustModal({ mode: 'set-initial', stock });
+                      setStockAdjustVal(String(stock.current_stock));
+                      setStockAdjustNote('');
+                    }}
+                    className="inline-flex h-9 flex-1 items-center justify-center gap-1.5 rounded-xl border border-brand-amber-soft bg-white px-3 text-xs font-bold text-brand-brown hover:bg-brand-cream-deep disabled:opacity-50"
                   >
-                    <Trash2 className="h-4 w-4" />
+                    <SlidersHorizontal className="h-3.5 w-3.5" />
+                    <span>Koreksi Awal</span>
                   </button>
                 </div>
               </div>
-
-              <div className="mt-3 flex flex-wrap gap-2 border-t border-brand-amber-soft/50 pt-3">
-                <button
-                  type="button"
-                  disabled={!isStoreOpen || stock.is_active === 0}
-                  onClick={() => {
-                    setStockAdjustModal({ mode: 'restock', stock });
-                    setStockAdjustVal('');
-                    setStockAdjustNote('');
-                  }}
-                  className="inline-flex h-9 flex-1 items-center justify-center gap-1.5 rounded-xl bg-brand-orange px-3 text-xs font-bold text-white hover:bg-brand-orange-dark disabled:bg-stone-300"
-                >
-                  <PackagePlus className="h-3.5 w-3.5" />
-                  <span>Restock</span>
-                </button>
-                <button
-                  type="button"
-                  disabled={!isStoreOpen || stock.is_active === 0}
-                  onClick={() => {
-                    setStockAdjustModal({ mode: 'set-initial', stock });
-                    setStockAdjustVal(String(stock.current_stock));
-                    setStockAdjustNote('');
-                  }}
-                  className="inline-flex h-9 flex-1 items-center justify-center gap-1.5 rounded-xl border border-brand-amber-soft bg-white px-3 text-xs font-bold text-brand-brown hover:bg-brand-cream-deep disabled:opacity-50"
-                >
-                  <SlidersHorizontal className="h-3.5 w-3.5" />
-                  <span>Koreksi Awal</span>
-                </button>
-              </div>
-            </div>
-          ))}
+            ))}
+          </div>
         </div>
       )}
 
@@ -1137,7 +1262,10 @@ export function MenuStockPage({
               </span>
               <button
                 type="button"
-                disabled={menuReqs.length >= activeStocks.length}
+                disabled={
+                  activeStocks.every((s) => menuReqs.some((r) => r.stock_item_id === s.id)) &&
+                  (Boolean(editingMenu) || menuReqs.some((r) => r.stock_item_id === SELF_STOCK_ID))
+                }
                 onClick={addStockReqRow}
                 className="inline-flex items-center gap-1 rounded-lg bg-brand-brown px-2.5 py-1 text-[11px] font-bold text-brand-cream disabled:opacity-40"
               >
@@ -1146,47 +1274,59 @@ export function MenuStockPage({
               </button>
             </div>
             <div className="space-y-2">
-              {menuReqs.map((req, idx) => (
-                <div key={idx} className="flex items-center gap-2">
-                  <select
-                    value={req.stock_item_id}
-                    onChange={(e) => {
-                      const val = Number(e.target.value);
-                      setMenuReqs((prev) =>
-                        prev.map((r, i) => (i === idx ? { ...r, stock_item_id: val } : r))
-                      );
-                    }}
-                    className="h-10 flex-1 rounded-xl border border-brand-amber-soft bg-white px-2.5 text-xs font-semibold text-brand-brown"
-                  >
-                    {activeStocks.map((s) => (
-                      <option key={s.id} value={s.id}>
-                        {s.name} ({s.unit})
-                      </option>
-                    ))}
-                  </select>
-                  <input
-                    type="number"
-                    min={1}
-                    value={req.qty_per_unit}
-                    onChange={(e) => {
-                      const val = Math.max(1, Number(e.target.value) || 1);
-                      setMenuReqs((prev) =>
-                        prev.map((r, i) => (i === idx ? { ...r, qty_per_unit: val } : r))
-                      );
-                    }}
-                    className="h-10 w-16 rounded-xl border border-brand-amber-soft bg-white px-2 text-center text-xs font-bold text-brand-brown"
-                  />
-                  {menuReqs.length > 1 && (
-                    <button
-                      type="button"
-                      onClick={() => setMenuReqs((prev) => prev.filter((_, i) => i !== idx))}
-                      className="flex h-9 w-9 items-center justify-center rounded-lg text-rose-600 hover:bg-rose-50"
+              {menuReqs.map((req, idx) => {
+                const selfUsedElsewhere = menuReqs.some(
+                  (r, i) => i !== idx && r.stock_item_id === SELF_STOCK_ID
+                );
+                return (
+                  <div key={idx} className="flex items-center gap-2">
+                    <select
+                      value={req.stock_item_id}
+                      onChange={(e) => {
+                        const val = Number(e.target.value);
+                        setMenuReqs((prev) =>
+                          prev.map((r, i) => (i === idx ? { ...r, stock_item_id: val } : r))
+                        );
+                      }}
+                      className="h-10 flex-1 rounded-xl border border-brand-amber-soft bg-white px-2.5 text-xs font-semibold text-brand-brown"
                     >
-                      <Trash2 className="h-4 w-4" />
-                    </button>
-                  )}
-                </div>
-              ))}
+                      {!editingMenu && !selfUsedElsewhere && (
+                        <option value={SELF_STOCK_ID}>
+                          {menuName.trim()
+                            ? `✦ Stok baru: "${menuName.trim()}" (kurangi diri sendiri)`
+                            : '✦ Buat stok baru sesuai nama menu (kurangi diri sendiri)'}
+                        </option>
+                      )}
+                      {activeStocks.map((s) => (
+                        <option key={s.id} value={s.id}>
+                          {s.name} ({s.unit})
+                        </option>
+                      ))}
+                    </select>
+                    <input
+                      type="number"
+                      min={1}
+                      value={req.qty_per_unit}
+                      onChange={(e) => {
+                        const val = Math.max(1, Number(e.target.value) || 1);
+                        setMenuReqs((prev) =>
+                          prev.map((r, i) => (i === idx ? { ...r, qty_per_unit: val } : r))
+                        );
+                      }}
+                      className="h-10 w-16 rounded-xl border border-brand-amber-soft bg-white px-2 text-center text-xs font-bold text-brand-brown"
+                    />
+                    {menuReqs.length > 1 && (
+                      <button
+                        type="button"
+                        onClick={() => setMenuReqs((prev) => prev.filter((_, i) => i !== idx))}
+                        className="flex h-9 w-9 items-center justify-center rounded-lg text-rose-600 hover:bg-rose-50"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           </div>
 

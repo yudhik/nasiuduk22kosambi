@@ -34,6 +34,8 @@ pub struct MenuQuery {
 pub struct DeleteMenuResponse {
     pub deleted: bool,
     pub soft_deleted: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, FromRow)]
@@ -257,7 +259,23 @@ pub async fn create_menu(
             "Harga menu harus antara Rp 0 hingga Rp {MAX_MENU_PRICE}"
         )));
     }
-    let requirements = validate_requirements(&req.stock_requirements)?;
+    if let Some(self_qty) = req.create_self_stock_qty {
+        if self_qty <= 0 || self_qty > MAX_QTY_PER_UNIT {
+            return Err(AppError::Validation(format!(
+                "Jumlah pemakaian stok per porsi harus antara 1 hingga {MAX_QTY_PER_UNIT}"
+            )));
+        }
+    }
+    if req.stock_requirements.is_empty() && req.create_self_stock_qty.is_none() {
+        return Err(AppError::Validation(
+            "Setiap menu wajib terhubung dengan minimal 1 item stok".into(),
+        ));
+    }
+    let mut requirements = if req.stock_requirements.is_empty() {
+        Vec::new()
+    } else {
+        validate_requirements(&req.stock_requirements)?
+    };
 
     let category: String = req
         .category
@@ -280,6 +298,50 @@ pub async fn create_menu(
     if dup.is_some() {
         return Err(AppError::Conflict(format!("Menu '{name}' sudah terdaftar")));
     }
+
+    if let Some(self_qty) = req.create_self_stock_qty {
+        let existing_stock: Option<(i64, i64)> = sqlx::query_as(
+            "SELECT id, is_active FROM stock_items WHERE LOWER(name) = LOWER(?) LIMIT 1",
+        )
+        .bind(name)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let self_stock_id = match existing_stock {
+            Some((sid, 1)) => sid,
+            Some((sid, _)) => {
+                sqlx::query("UPDATE stock_items SET is_active = 1, updated_at = ? WHERE id = ?")
+                    .bind(&now)
+                    .bind(sid)
+                    .execute(&mut *tx)
+                    .await?;
+                sid
+            }
+            None => {
+                let sres = sqlx::query(
+                    r#"
+                    INSERT INTO stock_items (name, unit, current_stock, is_active, created_at, updated_at)
+                    VALUES (?, 'porsi', 0, 1, ?, ?)
+                    "#,
+                )
+                .bind(name)
+                .bind(&now)
+                .bind(&now)
+                .execute(&mut *tx)
+                .await?;
+                sres.last_insert_rowid()
+            }
+        };
+
+        if !requirements.iter().any(|r| r.stock_item_id == self_stock_id) {
+            requirements.push(MenuStockRequirementInput {
+                stock_item_id: self_stock_id,
+                qty_per_unit: self_qty,
+            });
+        }
+    }
+
+    let requirements = validate_requirements(&requirements)?;
 
     for r in &requirements {
         let stock_active: Option<(i64,)> =
@@ -464,13 +526,21 @@ pub async fn delete_menu(
         return Err(AppError::NotFound(format!("Menu #{id} tidak ditemukan")));
     }
 
-    let order_refs: (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM order_items WHERE menu_item_id = ?")
-            .bind(id)
-            .fetch_one(&mut *tx)
-            .await?;
+    let (total_refs, voided_refs): (i64, i64) = sqlx::query_as(
+        r#"
+        SELECT
+            COUNT(*),
+            COALESCE(SUM(CASE WHEN o.status = 'VOIDED' THEN 1 ELSE 0 END), 0)
+        FROM order_items oi
+        INNER JOIN orders o ON o.id = oi.order_id
+        WHERE oi.menu_item_id = ?
+        "#,
+    )
+    .bind(id)
+    .fetch_one(&mut *tx)
+    .await?;
 
-    if order_refs.0 > 0 {
+    if total_refs > 0 {
         let now = now_iso();
         sqlx::query("UPDATE menu_items SET is_active = 0, updated_at = ? WHERE id = ?")
             .bind(&now)
@@ -478,9 +548,15 @@ pub async fn delete_menu(
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
+        let reason = if voided_refs == total_refs {
+            "Menu pernah tercatat pada nota yang dibatalkan (VOID), sehingga diarsipkan agar riwayat nota tetap utuh."
+        } else {
+            "Menu pernah tercatat pada riwayat transaksi nota, sehingga diarsipkan agar laporan tetap akurat."
+        };
         return Ok(Json(DeleteMenuResponse {
             deleted: true,
             soft_deleted: true,
+            reason: Some(reason.to_string()),
         }));
     }
 
@@ -505,6 +581,7 @@ pub async fn delete_menu(
     Ok(Json(DeleteMenuResponse {
         deleted: true,
         soft_deleted: false,
+        reason: None,
     }))
 }
 

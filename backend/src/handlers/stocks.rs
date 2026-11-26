@@ -30,6 +30,8 @@ pub struct StockQuery {
 pub struct DeleteStockResponse {
     pub deleted: bool,
     pub soft_deleted: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 pub async fn list_stocks(
@@ -206,14 +208,20 @@ pub async fn delete_stock(
         return Err(AppError::NotFound(format!("Item stok #{id} tidak ditemukan")));
     }
 
-    let menu_refs: (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM menu_stock_requirements WHERE stock_item_id = ?")
-            .bind(id)
-            .fetch_one(&mut *tx)
-            .await?;
-    if menu_refs.0 > 0 {
+    let active_menu_refs: (i64,) = sqlx::query_as(
+        r#"
+        SELECT COUNT(*)
+        FROM menu_stock_requirements msr
+        INNER JOIN menu_items m ON m.id = msr.menu_item_id
+        WHERE msr.stock_item_id = ? AND m.is_active = 1
+        "#,
+    )
+    .bind(id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if active_menu_refs.0 > 0 {
         return Err(AppError::Conflict(
-            "Item stok masih terhubung ke menu. Hapus keterkaitan dari menu terlebih dahulu."
+            "Item stok masih terhubung ke menu aktif. Ubah atau hapus menu terkait terlebih dahulu."
                 .into(),
         ));
     }
@@ -246,9 +254,17 @@ pub async fn delete_stock(
         return Ok(Json(DeleteStockResponse {
             deleted: true,
             soft_deleted: true,
+            reason: Some(
+                "Item stok memiliki riwayat mutasi/transaksi, sehingga diarsipkan agar laporan tetap akurat."
+                    .to_string(),
+            ),
         }));
     }
 
+    sqlx::query("DELETE FROM menu_stock_requirements WHERE stock_item_id = ?")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
     sqlx::query("DELETE FROM stock_items WHERE id = ?")
         .bind(id)
         .execute(&mut *tx)
@@ -258,6 +274,7 @@ pub async fn delete_stock(
     Ok(Json(DeleteStockResponse {
         deleted: true,
         soft_deleted: false,
+        reason: None,
     }))
 }
 

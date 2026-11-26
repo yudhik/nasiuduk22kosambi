@@ -6,6 +6,7 @@ import {
   Package,
   Receipt,
   ShieldCheck,
+  Wallet,
 } from 'lucide-react';
 import { api, setUnauthorizedHandler } from './api/client';
 import { ReceiptPrintView } from './components/ReceiptPrintView';
@@ -13,6 +14,7 @@ import { ToastContainer, type ToastMessage } from './components/ToastContainer';
 import { AdminUsersPage, roleBadge } from './pages/AdminUsersPage';
 import { CashierOrdersPage } from './pages/CashierOrdersPage';
 import { DailyReportPage } from './pages/DailyReportPage';
+import { ExpensesPage } from './pages/ExpensesPage';
 import { LoginPage } from './pages/LoginPage';
 import { MenuStockPage } from './pages/MenuStockPage';
 import { WaiterOrderPage } from './pages/WaiterOrderPage';
@@ -34,6 +36,7 @@ const ALL_NAV_ITEMS: Array<{
   { key: 'waiter', label: 'Catat Nota', shortLabel: 'Catat', icon: ClipboardEdit },
   { key: 'cashier', label: 'Kasir & Nota', shortLabel: 'Kasir', icon: Receipt },
   { key: 'menu', label: 'Menu & Stok', shortLabel: 'Stok', icon: Package },
+  { key: 'expenses', label: 'Pengeluaran', shortLabel: 'Biaya', icon: Wallet },
   { key: 'report', label: 'Laporan', shortLabel: 'Laporan', icon: BarChart3 },
   { key: 'users', label: 'Admin', shortLabel: 'Admin', icon: ShieldCheck },
 ];
@@ -195,13 +198,15 @@ export default function App() {
 
   const badge = roleBadge(user.role);
   const mobileGridClass =
-    visibleNavItems.length >= 5
-      ? 'grid-cols-5'
-      : visibleNavItems.length === 4
-        ? 'grid-cols-4'
-        : visibleNavItems.length === 3
-          ? 'grid-cols-3'
-          : 'grid-cols-2';
+    visibleNavItems.length >= 6
+      ? 'grid-cols-6'
+      : visibleNavItems.length === 5
+        ? 'grid-cols-5'
+        : visibleNavItems.length === 4
+          ? 'grid-cols-4'
+          : visibleNavItems.length === 3
+            ? 'grid-cols-3'
+            : 'grid-cols-2';
 
   const storePill =
     storeStatus?.status === 'OPEN'
@@ -333,6 +338,12 @@ export default function App() {
             <MenuStockPage
               storeStatus={storeStatus}
               onStoreChanged={handleStoreChanged}
+              onToast={showToast}
+            />
+          )}
+          {activeTab === 'expenses' && user.allowed_tabs.includes('expenses') && (
+            <ExpensesPage
+              storeStatus={storeStatus}
               onToast={showToast}
             />
           )}
