@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
   BarChart3,
+  ChevronRight,
   Clock,
   Download,
   History,
@@ -9,10 +10,13 @@ import {
   TrendingUp,
 } from 'lucide-react';
 import { api } from '../api/client';
+import { BottomSheet } from '../components/BottomSheet';
 import type { ToastMessage } from '../components/ToastContainer';
 import type {
   AnalyticsPreset,
+  DailyExpense,
   DailyReportResponse,
+  OrderDetail,
   PerformanceAnalyticsResponse,
   StockMovement,
   StoreStatusResponse,
@@ -31,6 +35,50 @@ interface PhysicalDraft {
 
 type ReportTab = 'daily' | 'analytics';
 
+type DrilldownTarget =
+  | {
+      kind: 'orders';
+      title: string;
+      subtitle: string;
+      orders: OrderDetail[];
+      emptyText: string;
+    }
+  | {
+      kind: 'expenses';
+      title: string;
+      subtitle: string;
+      expenses: DailyExpense[];
+    }
+  | {
+      kind: 'net_profit';
+      title: string;
+      subtitle: string;
+      paidTotal: number;
+      expensesTotal: number;
+      netProfit: number;
+      orders: OrderDetail[];
+      expenses: DailyExpense[];
+    }
+  | {
+      kind: 'menu';
+      title: string;
+      subtitle: string;
+      menuItemId: number;
+      menuName: string;
+      orders: OrderDetail[];
+    };
+
+function orderStatusBadge(status: OrderDetail['status']) {
+  switch (status) {
+    case 'PAID':
+      return { label: 'Lunas', cls: 'bg-emerald-100 text-emerald-700' };
+    case 'UNPAID':
+      return { label: 'Belum Bayar', cls: 'bg-amber-100 text-amber-700' };
+    case 'VOIDED':
+      return { label: 'Void', cls: 'bg-stone-200 text-stone-700' };
+  }
+}
+
 function formatDurationSeconds(secs: number | null): string {
   if (secs === null) return '—';
   if (secs < 60) return `${secs} dtk`;
@@ -48,6 +96,8 @@ export function DailyReportPage({ storeStatus, onToast }: DailyReportPageProps) 
   // === Daily Report State ===
   const [date, setDate] = useState(todayLocalDate);
   const [report, setReport] = useState<DailyReportResponse | null>(null);
+  const [dailyOrders, setDailyOrders] = useState<OrderDetail[]>([]);
+  const [drilldown, setDrilldown] = useState<DrilldownTarget | null>(null);
   const [movements, setMovements] = useState<StockMovement[]>([]);
   const [showMovements, setShowMovements] = useState(false);
   const [drafts, setDrafts] = useState<Record<number, PhysicalDraft>>({});
@@ -67,12 +117,14 @@ export function DailyReportPage({ storeStatus, onToast }: DailyReportPageProps) 
     try {
       setLoadingDaily(true);
       setError(null);
-      const [rep, movs] = await Promise.all([
+      const [rep, movs, orders] = await Promise.all([
         api.getDailyReport(date),
         api.listStockMovements(date),
+        api.listOrders(date),
       ]);
       setReport(rep);
       setMovements(movs);
+      setDailyOrders(orders);
 
       const initialDrafts: Record<number, PhysicalDraft> = {};
       for (const row of rep.stock_reconciliation) {
@@ -238,26 +290,77 @@ export function DailyReportPage({ storeStatus, onToast }: DailyReportPageProps) 
           <div className="space-y-4">
             {/* Revenue, Expenses & Net Profit KPI Cards */}
             <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
-              <div className="rounded-2xl border border-emerald-200 bg-white p-4 shadow-sm">
-                <p className="text-xs font-semibold text-brand-brown/65">Pendapatan Lunas</p>
+              <button
+                type="button"
+                onClick={() => {
+                  const paidOrders = dailyOrders.filter((o) => o.status === 'PAID');
+                  setDrilldown({
+                    kind: 'orders',
+                    title: 'Detail Pendapatan Lunas',
+                    subtitle: `${report.business_date} • ${paidOrders.length} nota • ${formatRupiah(report.revenue.paid_total)}`,
+                    orders: paidOrders,
+                    emptyText: 'Belum ada nota lunas pada tanggal ini.',
+                  });
+                }}
+                className="group rounded-2xl border border-emerald-200 bg-white p-4 text-left shadow-sm transition hover:border-emerald-400 hover:shadow-md active:scale-[0.99]"
+              >
+                <div className="flex items-center justify-between gap-1">
+                  <p className="text-xs font-semibold text-brand-brown/65">Pendapatan Lunas</p>
+                  <ChevronRight className="h-3.5 w-3.5 text-emerald-600/60 transition group-hover:translate-x-0.5" />
+                </div>
                 <p className="mt-1 text-lg font-extrabold text-emerald-700 sm:text-xl">
                   {formatRupiah(report.revenue.paid_total)}
                 </p>
                 <p className="mt-0.5 text-[11px] text-brand-brown/60">
                   {report.revenue.paid_count} nota • {report.revenue.total_portions_sold} porsi
                 </p>
-              </div>
-              <div className="rounded-2xl border border-rose-200 bg-white p-4 shadow-sm">
-                <p className="text-xs font-semibold text-brand-brown/65">Pengeluaran Harian</p>
+              </button>
+
+              <button
+                type="button"
+                onClick={() =>
+                  setDrilldown({
+                    kind: 'expenses',
+                    title: 'Detail Pengeluaran Harian',
+                    subtitle: `${report.business_date} • ${report.expenses.length} catatan • ${formatRupiah(report.revenue.total_expenses)}`,
+                    expenses: report.expenses,
+                  })
+                }
+                className="group rounded-2xl border border-rose-200 bg-white p-4 text-left shadow-sm transition hover:border-rose-400 hover:shadow-md active:scale-[0.99]"
+              >
+                <div className="flex items-center justify-between gap-1">
+                  <p className="text-xs font-semibold text-brand-brown/65">Pengeluaran Harian</p>
+                  <ChevronRight className="h-3.5 w-3.5 text-rose-600/60 transition group-hover:translate-x-0.5" />
+                </div>
                 <p className="mt-1 text-lg font-extrabold text-rose-700 sm:text-xl">
                   {formatRupiah(report.revenue.total_expenses)}
                 </p>
                 <p className="mt-0.5 text-[11px] text-brand-brown/60">
                   {report.expenses.length} catatan biaya
                 </p>
-              </div>
-              <div className="rounded-2xl border border-brand-orange/40 bg-brand-cream-deep/60 p-4 shadow-sm">
-                <p className="text-xs font-bold text-brand-brown">Laba Bersih</p>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  const paidOrders = dailyOrders.filter((o) => o.status === 'PAID');
+                  setDrilldown({
+                    kind: 'net_profit',
+                    title: 'Detail Laba Bersih',
+                    subtitle: `${report.business_date} • Lunas ${formatRupiah(report.revenue.paid_total)} − Biaya ${formatRupiah(report.revenue.total_expenses)}`,
+                    paidTotal: report.revenue.paid_total,
+                    expensesTotal: report.revenue.total_expenses,
+                    netProfit: report.revenue.net_profit,
+                    orders: paidOrders,
+                    expenses: report.expenses,
+                  });
+                }}
+                className="group rounded-2xl border border-brand-orange/40 bg-brand-cream-deep/60 p-4 text-left shadow-sm transition hover:border-brand-orange hover:shadow-md active:scale-[0.99]"
+              >
+                <div className="flex items-center justify-between gap-1">
+                  <p className="text-xs font-bold text-brand-brown">Laba Bersih</p>
+                  <ChevronRight className="h-3.5 w-3.5 text-brand-brown/60 transition group-hover:translate-x-0.5" />
+                </div>
                 <p
                   className={`mt-1 text-lg font-extrabold sm:text-xl ${
                     report.revenue.net_profit >= 0 ? 'text-brand-brown' : 'text-rose-700'
@@ -266,47 +369,98 @@ export function DailyReportPage({ storeStatus, onToast }: DailyReportPageProps) 
                   {formatRupiah(report.revenue.net_profit)}
                 </p>
                 <p className="mt-0.5 text-[11px] text-brand-brown/65">Lunas − Pengeluaran</p>
-              </div>
-              <div className="rounded-2xl border border-brand-amber-soft bg-white p-4 shadow-sm">
-                <p className="text-xs font-semibold text-brand-brown/65">Belum Bayar</p>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  const unpaidOrders = dailyOrders.filter((o) => o.status === 'UNPAID');
+                  setDrilldown({
+                    kind: 'orders',
+                    title: 'Detail Nota Belum Bayar',
+                    subtitle: `${report.business_date} • ${unpaidOrders.length} nota • ${formatRupiah(report.revenue.unpaid_total)}`,
+                    orders: unpaidOrders,
+                    emptyText: 'Tidak ada nota belum bayar pada tanggal ini.',
+                  });
+                }}
+                className="group rounded-2xl border border-brand-amber-soft bg-white p-4 text-left shadow-sm transition hover:border-amber-400 hover:shadow-md active:scale-[0.99]"
+              >
+                <div className="flex items-center justify-between gap-1">
+                  <p className="text-xs font-semibold text-brand-brown/65">Belum Bayar</p>
+                  <ChevronRight className="h-3.5 w-3.5 text-amber-600/60 transition group-hover:translate-x-0.5" />
+                </div>
                 <p className="mt-1 text-lg font-extrabold text-amber-700 sm:text-xl">
                   {formatRupiah(report.revenue.unpaid_total)}
                 </p>
                 <p className="mt-0.5 text-[11px] text-brand-brown/60">
                   {report.revenue.unpaid_count} nota
                 </p>
-              </div>
-              <div className="col-span-2 rounded-2xl border border-brand-amber-soft bg-white p-4 shadow-sm lg:col-span-1">
-                <p className="text-xs font-semibold text-brand-brown/65">Dibatalkan (Void)</p>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  const voidedOrders = dailyOrders.filter((o) => o.status === 'VOIDED');
+                  setDrilldown({
+                    kind: 'orders',
+                    title: 'Detail Nota Dibatalkan (Void)',
+                    subtitle: `${report.business_date} • ${voidedOrders.length} nota • ${formatRupiah(report.revenue.voided_total)}`,
+                    orders: voidedOrders,
+                    emptyText: 'Tidak ada nota dibatalkan pada tanggal ini.',
+                  });
+                }}
+                className="group col-span-2 rounded-2xl border border-brand-amber-soft bg-white p-4 text-left shadow-sm transition hover:border-stone-400 hover:shadow-md active:scale-[0.99] lg:col-span-1"
+              >
+                <div className="flex items-center justify-between gap-1">
+                  <p className="text-xs font-semibold text-brand-brown/65">Dibatalkan (Void)</p>
+                  <ChevronRight className="h-3.5 w-3.5 text-stone-500/70 transition group-hover:translate-x-0.5" />
+                </div>
                 <p className="mt-1 text-lg font-extrabold text-stone-600 sm:text-xl">
                   {formatRupiah(report.revenue.voided_total)}
                 </p>
                 <p className="mt-0.5 text-[11px] text-brand-brown/60">
                   {report.revenue.voided_count} nota
                 </p>
-              </div>
+              </button>
             </div>
 
             {/* Sales Grouped by Channel */}
             <div className="rounded-2xl border border-brand-amber-soft bg-white p-4 shadow-sm">
-              <h3 className="text-sm font-extrabold text-brand-brown">
-                Total Penjualan per Channel ({report.business_date})
-              </h3>
+              <div className="flex items-center justify-between gap-2">
+                <h3 className="text-sm font-extrabold text-brand-brown">
+                  Total Penjualan per Channel ({report.business_date})
+                </h3>
+                <span className="text-[11px] text-brand-brown/55">Klik untuk lihat transaksi</span>
+              </div>
               {report.sales_by_channel.length === 0 ? (
                 <p className="mt-2 text-xs text-brand-brown/60">Belum ada penjualan pada tanggal ini.</p>
               ) : (
                 <div className="mt-3 grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-4">
                   {report.sales_by_channel.map((ch) => (
-                    <div
+                    <button
                       key={ch.channel_name}
-                      className="rounded-xl border border-brand-amber-soft bg-brand-cream/60 p-3"
+                      type="button"
+                      onClick={() => {
+                        const channelOrders = dailyOrders.filter(
+                          (o) => o.status !== 'VOIDED' && o.channel_name === ch.channel_name
+                        );
+                        setDrilldown({
+                          kind: 'orders',
+                          title: `Transaksi Channel ${ch.channel_name}`,
+                          subtitle: `${report.business_date} • ${channelOrders.length} nota • ${formatRupiah(ch.total_revenue)}`,
+                          orders: channelOrders,
+                          emptyText: `Tidak ada transaksi aktif untuk channel ${ch.channel_name}.`,
+                        });
+                      }}
+                      className="group rounded-xl border border-brand-amber-soft bg-brand-cream/60 p-3 text-left transition hover:border-brand-orange hover:bg-brand-cream active:scale-[0.99]"
                     >
                       <div className="flex items-center justify-between">
                         <span className="text-xs font-extrabold text-brand-brown">
                           {ch.channel_name}
                         </span>
-                        <span className="rounded-full bg-white px-2 py-0.5 text-[11px] font-bold text-brand-brown/80">
+                        <span className="inline-flex items-center gap-0.5 rounded-full bg-white px-2 py-0.5 text-[11px] font-bold text-brand-brown/80">
                           {ch.order_count} nota
+                          <ChevronRight className="h-3 w-3 text-brand-orange/70 transition group-hover:translate-x-0.5" />
                         </span>
                       </div>
                       <p className="mt-1.5 text-base font-extrabold text-brand-orange">
@@ -316,7 +470,7 @@ export function DailyReportPage({ storeStatus, onToast }: DailyReportPageProps) 
                         Lunas: {formatRupiah(ch.paid_revenue)}
                         {ch.unpaid_count > 0 ? ` • Belum: ${ch.unpaid_count}` : ''}
                       </p>
-                    </div>
+                    </button>
                   ))}
                 </div>
               )}
@@ -417,9 +571,12 @@ export function DailyReportPage({ storeStatus, onToast }: DailyReportPageProps) 
             {/* Menu Sales Table */}
             {report.sales_by_menu.length > 0 && (
               <div className="rounded-2xl border border-brand-amber-soft bg-white p-4 shadow-sm">
-                <h3 className="mb-3 text-sm font-extrabold text-brand-brown">
-                  Rincian Penjualan per Menu
-                </h3>
+                <div className="mb-3 flex items-center justify-between gap-2">
+                  <h3 className="text-sm font-extrabold text-brand-brown">
+                    Rincian Penjualan per Menu
+                  </h3>
+                  <span className="text-[11px] text-brand-brown/55">Klik baris untuk detail nota</span>
+                </div>
                 <div className="overflow-x-auto">
                   <table className="min-w-full divide-y divide-brand-amber-soft/60 text-left text-xs">
                     <thead className="bg-brand-cream text-[11px] font-bold uppercase text-brand-brown/75">
@@ -431,11 +588,36 @@ export function DailyReportPage({ storeStatus, onToast }: DailyReportPageProps) 
                     </thead>
                     <tbody className="divide-y divide-brand-amber-soft/40">
                       {report.sales_by_menu.map((m) => (
-                        <tr key={`${m.menu_item_id}-${m.menu_name}`}>
+                        <tr
+                          key={`${m.menu_item_id}-${m.menu_name}`}
+                          onClick={() => {
+                            const menuOrders = dailyOrders.filter(
+                              (o) =>
+                                o.status !== 'VOIDED' &&
+                                o.items.some(
+                                  (it) =>
+                                    it.menu_item_id === m.menu_item_id &&
+                                    it.menu_name_snapshot === m.menu_name
+                                )
+                            );
+                            setDrilldown({
+                              kind: 'menu',
+                              title: `Transaksi Menu: ${m.menu_name}`,
+                              subtitle: `${report.business_date} • ${m.quantity_sold} porsi • ${formatRupiah(m.total_revenue)}`,
+                              menuItemId: m.menu_item_id,
+                              menuName: m.menu_name,
+                              orders: menuOrders,
+                            });
+                          }}
+                          className="cursor-pointer transition hover:bg-brand-cream/70"
+                        >
                           <td className="px-3 py-2 font-bold text-brand-brown">{m.menu_name}</td>
                           <td className="px-3 py-2 text-right font-semibold">{m.quantity_sold}</td>
                           <td className="px-3 py-2 text-right font-extrabold text-brand-orange">
-                            {formatRupiah(m.total_revenue)}
+                            <span className="inline-flex items-center gap-1">
+                              {formatRupiah(m.total_revenue)}
+                              <ChevronRight className="h-3.5 w-3.5 text-brand-orange/60" />
+                            </span>
                           </td>
                         </tr>
                       ))}
@@ -622,17 +804,25 @@ export function DailyReportPage({ storeStatus, onToast }: DailyReportPageProps) 
 
               {/* Daily Trend */}
               <div className="rounded-2xl border border-brand-amber-soft bg-white p-4 shadow-sm">
-                <h3 className="mb-3 text-sm font-extrabold text-brand-brown">
-                  Tren Harian (Pendapatan vs Pengeluaran)
-                </h3>
+                <div className="mb-3 flex items-center justify-between gap-2">
+                  <h3 className="text-sm font-extrabold text-brand-brown">
+                    Tren Harian (Pendapatan vs Pengeluaran)
+                  </h3>
+                  <span className="text-[11px] text-brand-brown/55">Klik tanggal untuk buka rincian</span>
+                </div>
                 {analytics.daily_trend.length === 0 ? (
                   <p className="text-xs text-brand-brown/60">Belum ada data harian.</p>
                 ) : (
                   <div className="space-y-2.5">
                     {analytics.daily_trend.map((d) => (
-                      <div
+                      <button
                         key={d.business_date}
-                        className="rounded-xl border border-brand-amber-soft/60 bg-brand-cream/40 p-3 text-xs"
+                        type="button"
+                        onClick={() => {
+                          setDate(d.business_date);
+                          setTab('daily');
+                        }}
+                        className="block w-full rounded-xl border border-brand-amber-soft/60 bg-brand-cream/40 p-3 text-left text-xs transition hover:border-brand-orange hover:bg-brand-cream/80"
                       >
                         <div className="flex flex-wrap items-center justify-between gap-2">
                           <div className="flex items-center gap-2">
@@ -652,6 +842,7 @@ export function DailyReportPage({ storeStatus, onToast }: DailyReportPageProps) 
                             <span className="text-brand-brown">
                               Bersih: {formatRupiah(d.net_profit)}
                             </span>
+                            <ChevronRight className="h-3.5 w-3.5 text-brand-orange/70" />
                           </div>
                         </div>
                         <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-white">
@@ -662,7 +853,7 @@ export function DailyReportPage({ storeStatus, onToast }: DailyReportPageProps) 
                             }}
                           />
                         </div>
-                      </div>
+                      </button>
                     ))}
                   </div>
                 )}
@@ -867,6 +1058,236 @@ export function DailyReportPage({ storeStatus, onToast }: DailyReportPageProps) 
           )}
         </div>
       )}
+
+      {/* Transaction Drilldown Sheet */}
+      <BottomSheet
+        open={drilldown !== null}
+        title={drilldown?.title ?? ''}
+        subtitle={drilldown?.subtitle}
+        onClose={() => setDrilldown(null)}
+      >
+        {drilldown?.kind === 'orders' && (
+          drilldown.orders.length === 0 ? (
+            <p className="py-6 text-center text-xs text-brand-brown/60">{drilldown.emptyText}</p>
+          ) : (
+            <div className="space-y-2.5">
+              {drilldown.orders.map((order) => {
+                const badge = orderStatusBadge(order.status);
+                return (
+                  <div
+                    key={order.id}
+                    className="rounded-xl border border-brand-amber-soft bg-brand-cream/40 p-3 text-xs"
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div>
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <span className="font-mono font-extrabold text-brand-brown">
+                            {order.order_number}
+                          </span>
+                          <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${badge.cls}`}>
+                            {badge.label}
+                          </span>
+                          <span className="rounded bg-white px-1.5 py-0.5 text-[10px] font-semibold text-brand-brown/80">
+                            {order.channel_name}
+                          </span>
+                        </div>
+                        <p className="mt-0.5 text-[11px] text-brand-brown/65">
+                          {formatTime(order.created_at)} • @{order.waiter_name}
+                          {order.customer_label ? ` • ${order.customer_label}` : ''}
+                        </p>
+                      </div>
+                      <span className="shrink-0 text-sm font-extrabold text-brand-brown">
+                        {formatRupiah(order.total_amount)}
+                      </span>
+                    </div>
+
+                    <div className="mt-2 space-y-1 border-t border-brand-amber-soft/50 pt-2">
+                      {order.items.map((it) => (
+                        <div key={it.id} className="flex items-center justify-between gap-2 text-[11px]">
+                          <span className="text-brand-brown/85">
+                            {it.quantity}× {it.menu_name_snapshot}
+                            {it.item_note ? ` (${it.item_note})` : ''}
+                          </span>
+                          <span className="font-semibold text-brand-brown">
+                            {formatRupiah(it.subtotal)}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+
+                    {order.void_reason && (
+                      <p className="mt-2 rounded-lg bg-stone-100 px-2 py-1 text-[11px] text-stone-700">
+                        Alasan void: {order.void_reason}
+                      </p>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )
+        )}
+
+        {drilldown?.kind === 'expenses' && (
+          drilldown.expenses.length === 0 ? (
+            <p className="py-6 text-center text-xs text-brand-brown/60">
+              Belum ada catatan pengeluaran pada tanggal ini.
+            </p>
+          ) : (
+            <div className="space-y-2">
+              {drilldown.expenses.map((ex) => (
+                <div
+                  key={ex.id}
+                  className="flex items-start justify-between gap-2 rounded-xl border border-rose-200/80 bg-rose-50/40 p-3 text-xs"
+                >
+                  <div>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="font-bold text-brand-brown">{ex.title}</span>
+                      <span className="rounded bg-white px-1.5 py-0.5 text-[10px] font-semibold text-brand-brown/80">
+                        {ex.category}
+                      </span>
+                    </div>
+                    {ex.notes && <p className="mt-0.5 text-[11px] text-brand-brown/65">{ex.notes}</p>}
+                    <p className="mt-0.5 text-[10px] text-brand-brown/55">
+                      {formatTime(ex.created_at)} • @{ex.created_by_username}
+                    </p>
+                  </div>
+                  <span className="shrink-0 font-extrabold text-rose-700">
+                    -{formatRupiah(ex.amount)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )
+        )}
+
+        {drilldown?.kind === 'net_profit' && (
+          <div className="space-y-4 text-xs">
+            <div className="grid grid-cols-3 gap-2 rounded-xl border border-brand-amber-soft bg-brand-cream/60 p-3 text-center">
+              <div>
+                <p className="text-[10px] font-semibold text-brand-brown/65">Lunas</p>
+                <p className="mt-0.5 font-extrabold text-emerald-700">
+                  +{formatRupiah(drilldown.paidTotal)}
+                </p>
+              </div>
+              <div>
+                <p className="text-[10px] font-semibold text-brand-brown/65">Pengeluaran</p>
+                <p className="mt-0.5 font-extrabold text-rose-700">
+                  -{formatRupiah(drilldown.expensesTotal)}
+                </p>
+              </div>
+              <div>
+                <p className="text-[10px] font-bold text-brand-brown">Laba Bersih</p>
+                <p
+                  className={`mt-0.5 font-extrabold ${
+                    drilldown.netProfit >= 0 ? 'text-brand-brown' : 'text-rose-700'
+                  }`}
+                >
+                  {formatRupiah(drilldown.netProfit)}
+                </p>
+              </div>
+            </div>
+
+            <div>
+              <h4 className="mb-2 font-extrabold text-emerald-700">
+                Pemasukan — Nota Lunas ({drilldown.orders.length})
+              </h4>
+              {drilldown.orders.length === 0 ? (
+                <p className="text-brand-brown/55">Belum ada nota lunas.</p>
+              ) : (
+                <div className="divide-y divide-brand-amber-soft/50 rounded-xl border border-brand-amber-soft/70">
+                  {drilldown.orders.map((o) => (
+                    <div key={o.id} className="flex items-center justify-between gap-2 px-3 py-2">
+                      <div>
+                        <span className="font-mono font-bold text-brand-brown">{o.order_number}</span>
+                        <span className="ml-1.5 text-[11px] text-brand-brown/65">
+                          {o.channel_name} • {formatTime(o.created_at)}
+                        </span>
+                      </div>
+                      <span className="font-extrabold text-emerald-700">
+                        +{formatRupiah(o.total_amount)}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div>
+              <h4 className="mb-2 font-extrabold text-rose-700">
+                Pengeluaran Harian ({drilldown.expenses.length})
+              </h4>
+              {drilldown.expenses.length === 0 ? (
+                <p className="text-brand-brown/55">Belum ada pengeluaran.</p>
+              ) : (
+                <div className="divide-y divide-rose-200/60 rounded-xl border border-rose-200/70">
+                  {drilldown.expenses.map((ex) => (
+                    <div key={ex.id} className="flex items-center justify-between gap-2 px-3 py-2">
+                      <div>
+                        <span className="font-bold text-brand-brown">{ex.title}</span>
+                        <span className="ml-1.5 text-[11px] text-brand-brown/65">
+                          {ex.category} • {formatTime(ex.created_at)}
+                        </span>
+                      </div>
+                      <span className="font-extrabold text-rose-700">
+                        -{formatRupiah(ex.amount)}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {drilldown?.kind === 'menu' && (
+          drilldown.orders.length === 0 ? (
+            <p className="py-6 text-center text-xs text-brand-brown/60">
+              Tidak ada transaksi untuk menu ini.
+            </p>
+          ) : (
+            <div className="space-y-2.5">
+              {drilldown.orders.map((order) => {
+                const badge = orderStatusBadge(order.status);
+                const matchingItems = order.items.filter(
+                  (it) =>
+                    it.menu_item_id === drilldown.menuItemId &&
+                    it.menu_name_snapshot === drilldown.menuName
+                );
+                const menuQty = matchingItems.reduce((acc, it) => acc + it.quantity, 0);
+                const menuSubtotal = matchingItems.reduce((acc, it) => acc + it.subtotal, 0);
+                return (
+                  <div
+                    key={order.id}
+                    className="flex items-center justify-between gap-2 rounded-xl border border-brand-amber-soft bg-brand-cream/40 p-3 text-xs"
+                  >
+                    <div>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span className="font-mono font-extrabold text-brand-brown">
+                          {order.order_number}
+                        </span>
+                        <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${badge.cls}`}>
+                          {badge.label}
+                        </span>
+                        <span className="rounded bg-white px-1.5 py-0.5 text-[10px] font-semibold text-brand-brown/80">
+                          {order.channel_name}
+                        </span>
+                      </div>
+                      <p className="mt-0.5 text-[11px] text-brand-brown/65">
+                        {formatTime(order.created_at)} • @{order.waiter_name}
+                        {order.customer_label ? ` • ${order.customer_label}` : ''}
+                      </p>
+                    </div>
+                    <div className="text-right">
+                      <p className="font-extrabold text-brand-orange">{formatRupiah(menuSubtotal)}</p>
+                      <p className="text-[11px] font-semibold text-brand-brown/70">{menuQty} porsi</p>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )
+        )}
+      </BottomSheet>
     </div>
   );
 }
