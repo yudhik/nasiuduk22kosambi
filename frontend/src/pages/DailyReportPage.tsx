@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   BarChart3,
+  ChevronLeft,
   ChevronRight,
   Clock,
   Download,
@@ -98,6 +99,16 @@ function buildDraftsFromReport(rep: DailyReportResponse): Record<number, Physica
     };
   }
   return next;
+}
+
+function shiftLocalDate(isoDate: string, deltaDays: number): string {
+  const parts = isoDate.split('-').map(Number);
+  if (parts.length !== 3 || parts.some((n) => Number.isNaN(n))) return todayLocalDate();
+  const d = new Date(parts[0], parts[1] - 1, parts[2] + deltaDays);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
 }
 
 function formatDurationSeconds(secs: number | null): string {
@@ -326,13 +337,43 @@ export function DailyReportPage({ storeStatus, onToast }: DailyReportPageProps) 
 
         {tab === 'daily' && (
           <div className="flex flex-wrap items-center gap-2">
-            <input
-              type="date"
-              aria-label="Tanggal laporan harian"
-              value={date}
-              onChange={(e) => handleDateChange(e.target.value)}
-              className="h-10 rounded-xl border border-brand-amber bg-white px-3 text-xs font-bold text-brand-brown focus:border-brand-orange-dark focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-orange"
-            />
+            <div className="inline-flex items-center rounded-xl border border-brand-amber bg-white p-0.5">
+              <button
+                type="button"
+                aria-label="Hari sebelumnya"
+                title="Hari sebelumnya"
+                onClick={() => handleDateChange(shiftLocalDate(date, -1))}
+                className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-brand-brown transition hover:bg-brand-cream-deep focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-orange"
+              >
+                <ChevronLeft className="h-4 w-4" />
+              </button>
+              <input
+                type="date"
+                aria-label="Tanggal laporan harian"
+                value={date}
+                onChange={(e) => handleDateChange(e.target.value)}
+                className="h-9 bg-transparent px-2 text-xs font-bold tabular-nums text-brand-brown focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-orange"
+              />
+              <button
+                type="button"
+                aria-label="Hari berikutnya"
+                title="Hari berikutnya"
+                disabled={date >= todayLocalDate()}
+                onClick={() => handleDateChange(shiftLocalDate(date, 1))}
+                className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-brand-brown transition hover:bg-brand-cream-deep focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-orange disabled:cursor-not-allowed disabled:opacity-35"
+              >
+                <ChevronRight className="h-4 w-4" />
+              </button>
+            </div>
+            {date !== todayLocalDate() && (
+              <button
+                type="button"
+                onClick={() => handleDateChange(todayLocalDate())}
+                className="inline-flex h-10 items-center rounded-xl border border-brand-amber bg-brand-cream px-3 text-xs font-bold text-brand-brown hover:bg-brand-cream-deep focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-orange"
+              >
+                Hari Ini
+              </button>
+            )}
             <button
               type="button"
               aria-label="Muat ulang laporan harian"
@@ -349,7 +390,7 @@ export function DailyReportPage({ storeStatus, onToast }: DailyReportPageProps) 
             <a
               href={api.getCsvExportUrl(date)}
               download={`laporan-${date}.csv`}
-              className="inline-flex h-10 items-center gap-1.5 rounded-xl bg-brand-brown px-3.5 text-xs font-bold text-brand-cream hover:bg-brand-brown-dark"
+              className="inline-flex h-10 items-center gap-1.5 rounded-xl bg-brand-brown px-3.5 text-xs font-bold text-brand-cream hover:bg-brand-brown-dark focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-orange"
             >
               <Download className="h-4 w-4" />
               <span>Export CSV</span>
@@ -880,11 +921,11 @@ export function DailyReportPage({ storeStatus, onToast }: DailyReportPageProps) 
                   <h3 className="text-sm font-extrabold text-brand-brown">
                     Rincian Penjualan per Menu
                   </h3>
-                  <span className="text-[11px] text-brand-brown/55">Klik baris untuk detail nota</span>
+                  <span className="text-[11px] text-brand-brown/70">Klik atau tekan Enter untuk detail nota</span>
                 </div>
                 <div className="overflow-x-auto">
-                  <table className="min-w-full divide-y divide-brand-amber-soft/60 text-left text-xs">
-                    <thead className="bg-brand-cream text-[11px] font-bold uppercase text-brand-brown/75">
+                  <table className="min-w-full divide-y divide-brand-amber-soft/60 text-left text-xs tabular-nums">
+                    <thead className="bg-brand-cream text-[11px] font-bold uppercase text-brand-brown/80">
                       <tr>
                         <th className="px-3 py-2">Menu</th>
                         <th className="px-3 py-2 text-right">Terjual</th>
@@ -892,40 +933,52 @@ export function DailyReportPage({ storeStatus, onToast }: DailyReportPageProps) 
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-brand-amber-soft/40">
-                      {report.sales_by_menu.map((m) => (
-                        <tr
-                          key={`${m.menu_item_id}-${m.menu_name}`}
-                          onClick={() => {
-                            const menuOrders = dailyOrders.filter(
-                              (o) =>
-                                o.status !== 'VOIDED' &&
-                                o.items.some(
-                                  (it) =>
-                                    it.menu_item_id === m.menu_item_id &&
-                                    it.menu_name_snapshot === m.menu_name
-                                )
-                            );
-                            setDrilldown({
-                              kind: 'menu',
-                              title: `Transaksi Menu: ${m.menu_name}`,
-                              subtitle: `${report.business_date} • ${m.quantity_sold} porsi • ${formatRupiah(m.total_revenue)}`,
-                              menuItemId: m.menu_item_id,
-                              menuName: m.menu_name,
-                              orders: menuOrders,
-                            });
-                          }}
-                          className="cursor-pointer transition hover:bg-brand-cream/70"
-                        >
-                          <td className="px-3 py-2 font-bold text-brand-brown">{m.menu_name}</td>
-                          <td className="px-3 py-2 text-right font-semibold">{m.quantity_sold}</td>
-                          <td className="px-3 py-2 text-right font-extrabold text-brand-orange">
-                            <span className="inline-flex items-center gap-1">
-                              {formatRupiah(m.total_revenue)}
-                              <ChevronRight className="h-3.5 w-3.5 text-brand-orange/60" />
-                            </span>
-                          </td>
-                        </tr>
-                      ))}
+                      {report.sales_by_menu.map((m) => {
+                        const openMenuDrilldown = () => {
+                          const menuOrders = dailyOrders.filter(
+                            (o) =>
+                              o.status !== 'VOIDED' &&
+                              o.items.some(
+                                (it) =>
+                                  it.menu_item_id === m.menu_item_id &&
+                                  it.menu_name_snapshot === m.menu_name
+                              )
+                          );
+                          setDrilldown({
+                            kind: 'menu',
+                            title: `Transaksi Menu: ${m.menu_name}`,
+                            subtitle: `${report.business_date} • ${m.quantity_sold} porsi • ${formatRupiah(m.total_revenue)}`,
+                            menuItemId: m.menu_item_id,
+                            menuName: m.menu_name,
+                            orders: menuOrders,
+                          });
+                        };
+                        return (
+                          <tr
+                            key={`${m.menu_item_id}-${m.menu_name}`}
+                            role="button"
+                            tabIndex={0}
+                            aria-label={`Lihat rincian nota untuk menu ${m.menu_name}`}
+                            onClick={openMenuDrilldown}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter' || e.key === ' ') {
+                                e.preventDefault();
+                                openMenuDrilldown();
+                              }
+                            }}
+                            className="cursor-pointer transition hover:bg-brand-cream/70 focus-visible:bg-brand-cream focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand-orange"
+                          >
+                            <td className="px-3 py-2.5 font-bold text-brand-brown">{m.menu_name}</td>
+                            <td className="px-3 py-2.5 text-right font-semibold">{m.quantity_sold}</td>
+                            <td className="px-3 py-2.5 text-right font-extrabold text-brand-orange">
+                              <span className="inline-flex items-center gap-1">
+                                {formatRupiah(m.total_revenue)}
+                                <ChevronRight className="h-3.5 w-3.5 text-brand-orange/70" />
+                              </span>
+                            </td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>
@@ -1052,333 +1105,376 @@ export function DailyReportPage({ storeStatus, onToast }: DailyReportPageProps) 
               </button>
             </div>
           ) : (
-            <div className="space-y-4">
-              {/* KPI Overview */}
-              <div className="grid grid-cols-2 gap-3 lg:grid-cols-6">
-                <div className="rounded-2xl border border-emerald-200 bg-white p-3.5 shadow-sm">
-                  <p className="text-[11px] font-semibold text-brand-brown/65">Total Pendapatan</p>
-                  <p className="mt-1 text-base font-extrabold text-emerald-700">
-                    {formatRupiah(analytics.summary.total_revenue)}
-                  </p>
-                </div>
-                <div className="rounded-2xl border border-rose-200 bg-white p-3.5 shadow-sm">
-                  <p className="text-[11px] font-semibold text-brand-brown/65">Total Pengeluaran</p>
-                  <p className="mt-1 text-base font-extrabold text-rose-700">
-                    {formatRupiah(analytics.summary.total_expenses)}
-                  </p>
-                </div>
-                <div className="rounded-2xl border border-brand-orange/40 bg-brand-cream-deep/70 p-3.5 shadow-sm">
-                  <p className="text-[11px] font-bold text-brand-brown">Laba Bersih</p>
-                  <p className="mt-1 text-base font-extrabold text-brand-brown">
-                    {formatRupiah(analytics.summary.net_profit)}
-                  </p>
-                </div>
-                <div className="rounded-2xl border border-brand-amber-soft bg-white p-3.5 shadow-sm">
-                  <p className="text-[11px] font-semibold text-brand-brown/65">Nota / Porsi</p>
-                  <p className="mt-1 text-base font-extrabold text-brand-brown">
-                    {analytics.summary.paid_orders} / {analytics.summary.total_portions}
-                  </p>
-                </div>
-                <div className="rounded-2xl border border-brand-amber-soft bg-white p-3.5 shadow-sm">
-                  <p className="text-[11px] font-semibold text-brand-brown/65">Rata-rata / Nota</p>
-                  <p className="mt-1 text-base font-extrabold text-brand-orange">
-                    {formatRupiah(analytics.summary.avg_order_value)}
-                  </p>
-                </div>
-                <div className="rounded-2xl border border-brand-amber-soft bg-white p-3.5 shadow-sm">
-                  <p className="text-[11px] font-semibold text-brand-brown/65">Hari Tutup / Aktif</p>
-                  <p className="mt-1 text-base font-extrabold text-brand-brown">
-                    {analytics.summary.closed_days_count} / {analytics.summary.active_days_count}
-                  </p>
-                </div>
-              </div>
+            <div className="space-y-6">
+              {/* Group 1: Ringkasan & Tren Keuangan */}
+              <section className="space-y-3">
+                <h2 className="text-sm font-extrabold tracking-tight text-brand-brown">
+                  Ringkasan &amp; Tren Keuangan ({analytics.from_date} – {analytics.to_date})
+                </h2>
 
-              {/* Channel Breakdown */}
-              <div className="rounded-2xl border border-brand-amber-soft bg-white p-4 shadow-sm">
-                <h3 className="mb-3 text-sm font-extrabold text-brand-brown">
-                  Performa Penjualan per Channel ({analytics.from_date} – {analytics.to_date})
-                </h3>
-                {analytics.by_channel.length === 0 ? (
-                  <p className="text-xs text-brand-brown/60">Belum ada data transaksi pada rentang ini.</p>
-                ) : (
-                  <div className="space-y-3">
-                    {analytics.by_channel.map((ch) => (
-                      <div key={ch.channel_name} className="space-y-1">
-                        <div className="flex items-center justify-between text-xs">
-                          <span className="font-bold text-brand-brown">
-                            {ch.channel_name}{' '}
-                            <span className="font-normal text-brand-brown/60">
-                              ({ch.order_count} nota)
-                            </span>
-                          </span>
-                          <span className="font-extrabold text-brand-orange">
-                            {formatRupiah(ch.revenue)} ({ch.share_percent}%)
-                          </span>
-                        </div>
-                        <div className="h-2.5 w-full overflow-hidden rounded-full bg-brand-cream-deep">
-                          <div
-                            className="h-full rounded-full bg-brand-orange"
-                            style={{ width: `${Math.min(100, Math.max(2, ch.share_percent))}%` }}
-                          />
-                        </div>
-                      </div>
-                    ))}
+                {/* KPI Overview */}
+                <div className="grid grid-cols-2 gap-3 tabular-nums lg:grid-cols-6">
+                  <div className="rounded-2xl border border-emerald-200 bg-white p-3.5 shadow-sm">
+                    <p className="text-[11px] font-semibold text-brand-brown/75">Total Pendapatan</p>
+                    <p className="mt-1 text-base font-extrabold text-emerald-700">
+                      {formatRupiah(analytics.summary.total_revenue)}
+                    </p>
                   </div>
-                )}
-              </div>
-
-              {/* Daily Trend */}
-              <div className="rounded-2xl border border-brand-amber-soft bg-white p-4 shadow-sm">
-                <div className="mb-3 flex items-center justify-between gap-2">
-                  <h3 className="text-sm font-extrabold text-brand-brown">
-                    Tren Harian (Pendapatan vs Pengeluaran)
-                  </h3>
-                  <span className="text-[11px] text-brand-brown/55">Klik tanggal untuk buka rincian</span>
-                </div>
-                {analytics.daily_trend.length === 0 ? (
-                  <p className="text-xs text-brand-brown/60">Belum ada data harian.</p>
-                ) : (
-                  <div className="space-y-2.5">
-                    {analytics.daily_trend.map((d) => (
-                      <button
-                        key={d.business_date}
-                        type="button"
-                        onClick={() => {
-                          setDate(d.business_date);
-                          setTab('daily');
-                        }}
-                        className="block w-full rounded-xl border border-brand-amber-soft/60 bg-brand-cream/40 p-3 text-left text-xs transition hover:border-brand-orange hover:bg-brand-cream/80"
-                      >
-                        <div className="flex flex-wrap items-center justify-between gap-2">
-                          <div className="flex items-center gap-2">
-                            <span className="font-mono font-bold text-brand-brown">
-                              {d.business_date}
-                            </span>
-                            <span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-bold text-brand-brown/75">
-                              {d.store_status}
-                            </span>
-                            <span className="text-brand-brown/65">
-                              {d.order_count} nota • {d.portions_sold} porsi
-                            </span>
-                          </div>
-                          <div className="flex items-center gap-3 font-bold">
-                            <span className="text-emerald-700">+{formatRupiah(d.revenue)}</span>
-                            <span className="text-rose-700">-{formatRupiah(d.expenses)}</span>
-                            <span className="text-brand-brown">
-                              Bersih: {formatRupiah(d.net_profit)}
-                            </span>
-                            <ChevronRight className="h-3.5 w-3.5 text-brand-orange/70" />
-                          </div>
-                        </div>
-                        <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-white">
-                          <div
-                            className="h-full rounded-full bg-emerald-500"
-                            style={{
-                              width: `${Math.max(2, Math.round((d.revenue / maxTrendRev) * 100))}%`,
-                            }}
-                          />
-                        </div>
-                      </button>
-                    ))}
+                  <div className="rounded-2xl border border-rose-200 bg-white p-3.5 shadow-sm">
+                    <p className="text-[11px] font-semibold text-brand-brown/75">Total Pengeluaran</p>
+                    <p className="mt-1 text-base font-extrabold text-rose-700">
+                      {formatRupiah(analytics.summary.total_expenses)}
+                    </p>
                   </div>
-                )}
-              </div>
-
-              {/* Per-User Nota Creation Interval */}
-              <div className="rounded-2xl border border-brand-amber-soft bg-white p-4 shadow-sm">
-                <div className="mb-3 flex items-center gap-2">
-                  <Clock className="h-4 w-4 text-brand-orange" />
-                  <h3 className="text-sm font-extrabold text-brand-brown">
-                    Interval Pembuatan Nota per Pengguna
-                  </h3>
-                </div>
-                {analytics.user_order_intervals.length === 0 ? (
-                  <p className="text-xs text-brand-brown/60">Belum ada data pembuatan nota.</p>
-                ) : (
-                  <div className="overflow-x-auto">
-                    <table className="min-w-full divide-y divide-brand-amber-soft/60 text-left text-xs">
-                      <thead className="bg-brand-cream text-[11px] font-bold uppercase text-brand-brown/75">
-                        <tr>
-                          <th className="px-3 py-2">Username</th>
-                          <th className="px-3 py-2 text-right">Nota Dibuat</th>
-                          <th className="px-3 py-2 text-right">Rata-rata Interval</th>
-                          <th className="px-3 py-2 text-right">Tercepat</th>
-                          <th className="px-3 py-2 text-right">Terlama</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-brand-amber-soft/40">
-                        {analytics.user_order_intervals.map((u) => (
-                          <tr key={u.username}>
-                            <td className="px-3 py-2 font-mono font-bold text-brand-brown">
-                              @{u.username}
-                            </td>
-                            <td className="px-3 py-2 text-right font-bold">{u.orders_created}</td>
-                            <td className="px-3 py-2 text-right font-extrabold text-brand-orange">
-                              {formatDurationSeconds(u.avg_interval_seconds)}
-                            </td>
-                            <td className="px-3 py-2 text-right text-emerald-700">
-                              {formatDurationSeconds(u.min_interval_seconds)}
-                            </td>
-                            <td className="px-3 py-2 text-right text-brand-brown/75">
-                              {formatDurationSeconds(u.max_interval_seconds)}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
+                  <div className="rounded-2xl border border-brand-orange/40 bg-brand-cream-deep/70 p-3.5 shadow-sm">
+                    <p className="text-[11px] font-bold text-brand-brown">Laba Bersih</p>
+                    <p className="mt-1 text-base font-extrabold text-brand-brown">
+                      {formatRupiah(analytics.summary.net_profit)}
+                    </p>
                   </div>
-                )}
-              </div>
+                  <div className="rounded-2xl border border-brand-amber-soft bg-white p-3.5 shadow-sm">
+                    <p className="text-[11px] font-semibold text-brand-brown/75">Nota / Porsi</p>
+                    <p className="mt-1 text-base font-extrabold text-brand-brown">
+                      {analytics.summary.paid_orders} / {analytics.summary.total_portions}
+                    </p>
+                  </div>
+                  <div className="rounded-2xl border border-brand-amber-soft bg-white p-3.5 shadow-sm">
+                    <p className="text-[11px] font-semibold text-brand-brown/75">Rata-rata / Nota</p>
+                    <p className="mt-1 text-base font-extrabold text-brand-orange">
+                      {formatRupiah(analytics.summary.avg_order_value)}
+                    </p>
+                  </div>
+                  <div className="rounded-2xl border border-brand-amber-soft bg-white p-3.5 shadow-sm">
+                    <p className="text-[11px] font-semibold text-brand-brown/75">Hari Tutup / Aktif</p>
+                    <p className="mt-1 text-base font-extrabold text-brand-brown">
+                      {analytics.summary.closed_days_count} / {analytics.summary.active_days_count}
+                    </p>
+                  </div>
+                </div>
 
-              {/* Peak Hours & Busiest Weekdays */}
-              <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+                {/* Channel Breakdown */}
                 <div className="rounded-2xl border border-brand-amber-soft bg-white p-4 shadow-sm">
                   <h3 className="mb-3 text-sm font-extrabold text-brand-brown">
-                    Jam Ramai (Peak Hours WIB)
+                    Performa Penjualan per Channel
                   </h3>
-                  {analytics.peak_hours.length === 0 ? (
-                    <p className="text-xs text-brand-brown/60">Belum ada data jam ramai.</p>
+                  {analytics.by_channel.length === 0 ? (
+                    <p className="text-xs text-brand-brown/75">Belum ada data transaksi pada rentang ini.</p>
                   ) : (
-                    <div className="space-y-2">
-                      {analytics.peak_hours.map((p) => (
-                        <div key={p.hour} className="flex items-center gap-2 text-xs">
-                          <span className="w-12 font-mono font-bold text-brand-brown">
-                            {p.label}
-                          </span>
-                          <div className="h-3 flex-1 overflow-hidden rounded-full bg-brand-cream-deep">
+                    <div className="space-y-3 tabular-nums">
+                      {analytics.by_channel.map((ch) => (
+                        <div key={ch.channel_name} className="space-y-1">
+                          <div className="flex items-center justify-between text-xs">
+                            <span className="font-bold text-brand-brown">
+                              {ch.channel_name}{' '}
+                              <span className="font-normal text-brand-brown/70">
+                                ({ch.order_count} nota)
+                              </span>
+                            </span>
+                            <span className="font-extrabold text-brand-orange">
+                              {formatRupiah(ch.revenue)} ({ch.share_percent}%)
+                            </span>
+                          </div>
+                          <div className="h-2.5 w-full overflow-hidden rounded-full bg-brand-cream-deep">
                             <div
                               className="h-full rounded-full bg-brand-orange"
+                              style={{ width: `${Math.min(100, Math.max(2, ch.share_percent))}%` }}
+                            />
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* Daily Trend (Dual-Bar: Pendapatan vs Pengeluaran) */}
+                <div className="rounded-2xl border border-brand-amber-soft bg-white p-4 shadow-sm">
+                  <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                    <h3 className="text-sm font-extrabold text-brand-brown">
+                      Tren Harian (Pendapatan vs Pengeluaran)
+                    </h3>
+                    <div className="flex flex-wrap items-center gap-3 text-[11px] font-semibold text-brand-brown/75">
+                      <span className="inline-flex items-center gap-1.5">
+                        <span className="h-2 w-2 rounded-full bg-emerald-500" />
+                        Pendapatan
+                      </span>
+                      <span className="inline-flex items-center gap-1.5">
+                        <span className="h-2 w-2 rounded-full bg-rose-500" />
+                        Pengeluaran
+                      </span>
+                      <span className="text-brand-brown/65">• Klik tanggal untuk rincian</span>
+                    </div>
+                  </div>
+                  {analytics.daily_trend.length === 0 ? (
+                    <p className="text-xs text-brand-brown/75">Belum ada data harian.</p>
+                  ) : (
+                    <div className="space-y-2.5 tabular-nums">
+                      {analytics.daily_trend.map((d) => {
+                        const revPct =
+                          d.revenue > 0 ? Math.max(2, Math.round((d.revenue / maxTrendRev) * 100)) : 0;
+                        const expPct =
+                          d.expenses > 0 ? Math.max(2, Math.round((d.expenses / maxTrendRev) * 100)) : 0;
+                        return (
+                          <button
+                            key={d.business_date}
+                            type="button"
+                            onClick={() => {
+                              setDate(d.business_date);
+                              setTab('daily');
+                            }}
+                            className="block w-full rounded-xl border border-brand-amber-soft/60 bg-brand-cream/40 p-3 text-left text-xs transition hover:border-brand-orange hover:bg-brand-cream/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-orange"
+                          >
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <div className="flex items-center gap-2">
+                                <span className="font-mono font-bold text-brand-brown">
+                                  {d.business_date}
+                                </span>
+                                <span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-bold text-brand-brown/80">
+                                  {d.store_status}
+                                </span>
+                                <span className="text-brand-brown/75">
+                                  {d.order_count} nota • {d.portions_sold} porsi
+                                </span>
+                              </div>
+                              <div className="flex flex-wrap items-center gap-3 font-bold">
+                                <span className="text-emerald-700">+{formatRupiah(d.revenue)}</span>
+                                <span className="text-rose-700">-{formatRupiah(d.expenses)}</span>
+                                <span className="text-brand-brown">
+                                  Bersih: {formatRupiah(d.net_profit)}
+                                </span>
+                                <ChevronRight className="h-3.5 w-3.5 text-brand-orange/70" />
+                              </div>
+                            </div>
+                            <div className="mt-2 space-y-1">
+                              <div className="h-2 w-full overflow-hidden rounded-full bg-white">
+                                <div
+                                  className="h-full rounded-full bg-emerald-500"
+                                  style={{ width: `${revPct}%` }}
+                                />
+                              </div>
+                              <div className="h-1.5 w-full overflow-hidden rounded-full bg-white">
+                                <div
+                                  className="h-full rounded-full bg-rose-500"
+                                  style={{ width: `${expPct}%` }}
+                                />
+                              </div>
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              </section>
+
+              {/* Group 2: Pola Ramai & Performa Menu */}
+              <section className="space-y-3">
+                <h2 className="text-sm font-extrabold tracking-tight text-brand-brown">
+                  Pola Ramai &amp; Performa Menu
+                </h2>
+
+                {/* Peak Hours & Busiest Weekdays */}
+                <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+                  <div className="rounded-2xl border border-brand-amber-soft bg-white p-4 shadow-sm">
+                    <h3 className="mb-3 text-sm font-extrabold text-brand-brown">
+                      Jam Ramai (Peak Hours WIB)
+                    </h3>
+                    {analytics.peak_hours.length === 0 ? (
+                      <p className="text-xs text-brand-brown/75">Belum ada data jam ramai.</p>
+                    ) : (
+                      <div className="space-y-2 tabular-nums">
+                        {analytics.peak_hours.map((p) => (
+                          <div key={p.hour} className="flex items-center gap-2 text-xs">
+                            <span className="w-12 font-mono font-bold text-brand-brown">
+                              {p.label}
+                            </span>
+                            <div className="h-3 flex-1 overflow-hidden rounded-full bg-brand-cream-deep">
+                              <div
+                                className="h-full rounded-full bg-brand-orange"
+                                style={{
+                                  width: `${Math.max(5, Math.round((p.order_count / maxPeakOrders) * 100))}%`,
+                                }}
+                              />
+                            </div>
+                            <span className="w-20 text-right font-semibold text-brand-brown">
+                              {p.order_count} nota
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="rounded-2xl border border-brand-amber-soft bg-white p-4 shadow-sm">
+                    <h3 className="mb-3 text-sm font-extrabold text-brand-brown">
+                      Hari Tersibuk (Senin – Minggu)
+                    </h3>
+                    <div className="space-y-2 tabular-nums">
+                      {analytics.by_weekday.map((w) => (
+                        <div key={w.weekday_index} className="flex items-center gap-2 text-xs">
+                          <span className="w-16 font-bold text-brand-brown">{w.label}</span>
+                          <div className="h-3 flex-1 overflow-hidden rounded-full bg-brand-cream-deep">
+                            <div
+                              className="h-full rounded-full bg-brand-brown"
                               style={{
-                                width: `${Math.max(5, Math.round((p.order_count / maxPeakOrders) * 100))}%`,
+                                width: `${
+                                  w.revenue > 0
+                                    ? Math.max(4, Math.round((w.revenue / maxWeekdayRev) * 100))
+                                    : 0
+                                }%`,
                               }}
                             />
                           </div>
-                          <span className="w-24 text-right font-semibold text-brand-brown">
-                            {p.order_count} nota
+                          <span className="w-28 text-right font-semibold text-brand-brown">
+                            {formatRupiah(w.revenue)}
                           </span>
                         </div>
                       ))}
                     </div>
-                  )}
-                </div>
-
-                <div className="rounded-2xl border border-brand-amber-soft bg-white p-4 shadow-sm">
-                  <h3 className="mb-3 text-sm font-extrabold text-brand-brown">
-                    Hari Tersibuk (Senin – Minggu)
-                  </h3>
-                  <div className="space-y-2">
-                    {analytics.by_weekday.map((w) => (
-                      <div key={w.weekday_index} className="flex items-center gap-2 text-xs">
-                        <span className="w-16 font-bold text-brand-brown">{w.label}</span>
-                        <div className="h-3 flex-1 overflow-hidden rounded-full bg-brand-cream-deep">
-                          <div
-                            className="h-full rounded-full bg-brand-brown"
-                            style={{
-                              width: `${
-                                w.revenue > 0
-                                  ? Math.max(4, Math.round((w.revenue / maxWeekdayRev) * 100))
-                                  : 0
-                              }%`,
-                            }}
-                          />
-                        </div>
-                        <span className="w-28 text-right font-semibold text-brand-brown">
-                          {formatRupiah(w.revenue)}
-                        </span>
-                      </div>
-                    ))}
                   </div>
                 </div>
-              </div>
 
-              {/* Top & Bottom Menus */}
-              <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-                <div className="rounded-2xl border border-brand-amber-soft bg-white p-4 shadow-sm">
-                  <h3 className="mb-2.5 text-sm font-extrabold text-brand-brown">Menu Terlaris</h3>
-                  {analytics.top_menus.length === 0 ? (
-                    <p className="text-xs text-brand-brown/60">Belum ada penjualan.</p>
-                  ) : (
-                    <div className="divide-y divide-brand-amber-soft/40 text-xs">
-                      {analytics.top_menus.map((m, i) => (
-                        <div key={m.menu_name} className="flex items-center justify-between py-2">
-                          <span className="font-bold text-brand-brown">
-                            {i + 1}. {m.menu_name}
-                          </span>
-                          <span className="font-semibold text-brand-orange">
-                            {m.quantity_sold} porsi • {formatRupiah(m.total_revenue)}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-
-                <div className="rounded-2xl border border-brand-amber-soft bg-white p-4 shadow-sm">
-                  <h3 className="mb-2.5 text-sm font-extrabold text-brand-brown">
-                    Menu Kurang Laris
-                  </h3>
-                  {analytics.bottom_menus.length === 0 ? (
-                    <p className="text-xs text-brand-brown/60">Belum ada penjualan.</p>
-                  ) : (
-                    <div className="divide-y divide-brand-amber-soft/40 text-xs">
-                      {analytics.bottom_menus.map((m) => (
-                        <div key={m.menu_name} className="flex items-center justify-between py-2">
-                          <span className="font-bold text-brand-brown">{m.menu_name}</span>
-                          <span className="font-semibold text-brand-brown/75">
-                            {m.quantity_sold} porsi • {formatRupiah(m.total_revenue)}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              {/* Stock Usage & Variance History */}
-              {analytics.stock_summary.length > 0 && (
-                <div className="rounded-2xl border border-brand-amber-soft bg-white p-4 shadow-sm">
-                  <h3 className="mb-3 text-sm font-extrabold text-brand-brown">
-                    Ringkasan Pemakaian &amp; Selisih Stok
-                  </h3>
-                  <div className="overflow-x-auto">
-                    <table className="min-w-full divide-y divide-brand-amber-soft/60 text-left text-xs">
-                      <thead className="bg-brand-cream text-[11px] font-bold uppercase text-brand-brown/75">
-                        <tr>
-                          <th className="px-3 py-2">Item Stok</th>
-                          <th className="px-3 py-2 text-right">Total Stok Masuk</th>
-                          <th className="px-3 py-2 text-right">Terpakai</th>
-                          <th className="px-3 py-2 text-right">Sisa Tak Terjual</th>
-                          <th className="px-3 py-2 text-right">Selisih Opname</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-brand-amber-soft/40">
-                        {analytics.stock_summary.map((s) => (
-                          <tr key={s.stock_item_id}>
-                            <td className="px-3 py-2 font-bold text-brand-brown">
-                              {s.stock_name}{' '}
-                              <span className="font-normal text-brand-brown/55">({s.unit})</span>
-                            </td>
-                            <td className="px-3 py-2 text-right">{s.total_supplied}</td>
-                            <td className="px-3 py-2 text-right font-bold">{s.total_sold}</td>
-                            <td className="px-3 py-2 text-right">{s.total_leftover}</td>
-                            <td className="px-3 py-2 text-right font-bold">
-                              {s.opname_days === 0 ? (
-                                <span className="text-stone-400">Belum opname</span>
-                              ) : s.total_variance === 0 ? (
-                                <span className="text-emerald-700">0</span>
-                              ) : s.total_variance < 0 ? (
-                                <span className="text-rose-700">{s.total_variance}</span>
-                              ) : (
-                                <span className="text-sky-700">+{s.total_variance}</span>
-                              )}
-                            </td>
-                          </tr>
+                {/* Top & Bottom Menus */}
+                <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+                  <div className="rounded-2xl border border-brand-amber-soft bg-white p-4 shadow-sm">
+                    <h3 className="mb-2.5 text-sm font-extrabold text-brand-brown">Menu Terlaris</h3>
+                    {analytics.top_menus.length === 0 ? (
+                      <p className="text-xs text-brand-brown/75">Belum ada penjualan.</p>
+                    ) : (
+                      <div className="divide-y divide-brand-amber-soft/40 text-xs tabular-nums">
+                        {analytics.top_menus.map((m, i) => (
+                          <div key={m.menu_name} className="flex items-center justify-between gap-2 py-2">
+                            <span className="font-bold text-brand-brown">
+                              {i + 1}. {m.menu_name}
+                            </span>
+                            <span className="shrink-0 font-semibold text-brand-orange">
+                              {m.quantity_sold} porsi • {formatRupiah(m.total_revenue)}
+                            </span>
+                          </div>
                         ))}
-                      </tbody>
-                    </table>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="rounded-2xl border border-brand-amber-soft bg-white p-4 shadow-sm">
+                    <h3 className="mb-2.5 text-sm font-extrabold text-brand-brown">
+                      Menu Kurang Laris
+                    </h3>
+                    {analytics.bottom_menus.length === 0 ? (
+                      <p className="text-xs text-brand-brown/75">Belum ada penjualan.</p>
+                    ) : (
+                      <div className="divide-y divide-brand-amber-soft/40 text-xs tabular-nums">
+                        {analytics.bottom_menus.map((m) => (
+                          <div key={m.menu_name} className="flex items-center justify-between gap-2 py-2">
+                            <span className="font-bold text-brand-brown">{m.menu_name}</span>
+                            <span className="shrink-0 font-semibold text-brand-brown/75">
+                              {m.quantity_sold} porsi • {formatRupiah(m.total_revenue)}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 </div>
-              )}
+              </section>
+
+              {/* Group 3: Operasional & Stok */}
+              <section className="space-y-3">
+                <h2 className="text-sm font-extrabold tracking-tight text-brand-brown">
+                  Operasional &amp; Stok
+                </h2>
+
+                {/* Per-User Nota Creation Interval */}
+                <div className="rounded-2xl border border-brand-amber-soft bg-white p-4 shadow-sm">
+                  <div className="mb-3 flex items-center gap-2">
+                    <Clock className="h-4 w-4 text-brand-orange" />
+                    <h3 className="text-sm font-extrabold text-brand-brown">
+                      Interval Pembuatan Nota per Pengguna
+                    </h3>
+                  </div>
+                  {analytics.user_order_intervals.length === 0 ? (
+                    <p className="text-xs text-brand-brown/75">Belum ada data pembuatan nota.</p>
+                  ) : (
+                    <div className="overflow-x-auto">
+                      <table className="min-w-full divide-y divide-brand-amber-soft/60 text-left text-xs tabular-nums">
+                        <thead className="bg-brand-cream text-[11px] font-bold uppercase text-brand-brown/80">
+                          <tr>
+                            <th className="px-3 py-2">Username</th>
+                            <th className="px-3 py-2 text-right">Nota Dibuat</th>
+                            <th className="px-3 py-2 text-right">Rata-rata Interval</th>
+                            <th className="px-3 py-2 text-right">Tercepat</th>
+                            <th className="px-3 py-2 text-right">Terlama</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-brand-amber-soft/40">
+                          {analytics.user_order_intervals.map((u) => (
+                            <tr key={u.username}>
+                              <td className="px-3 py-2 font-mono font-bold text-brand-brown">
+                                @{u.username}
+                              </td>
+                              <td className="px-3 py-2 text-right font-bold">{u.orders_created}</td>
+                              <td className="px-3 py-2 text-right font-extrabold text-brand-orange">
+                                {formatDurationSeconds(u.avg_interval_seconds)}
+                              </td>
+                              <td className="px-3 py-2 text-right text-emerald-700">
+                                {formatDurationSeconds(u.min_interval_seconds)}
+                              </td>
+                              <td className="px-3 py-2 text-right text-brand-brown/75">
+                                {formatDurationSeconds(u.max_interval_seconds)}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+
+                {/* Stock Usage & Variance History */}
+                {analytics.stock_summary.length > 0 && (
+                  <div className="rounded-2xl border border-brand-amber-soft bg-white p-4 shadow-sm">
+                    <h3 className="mb-3 text-sm font-extrabold text-brand-brown">
+                      Ringkasan Pemakaian &amp; Selisih Stok
+                    </h3>
+                    <div className="overflow-x-auto">
+                      <table className="min-w-full divide-y divide-brand-amber-soft/60 text-left text-xs tabular-nums">
+                        <thead className="bg-brand-cream text-[11px] font-bold uppercase text-brand-brown/80">
+                          <tr>
+                            <th className="px-3 py-2">Item Stok</th>
+                            <th className="px-3 py-2 text-right">Total Stok Masuk</th>
+                            <th className="px-3 py-2 text-right">Terpakai</th>
+                            <th className="px-3 py-2 text-right">Sisa Tak Terjual</th>
+                            <th className="px-3 py-2 text-right">Selisih Opname</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-brand-amber-soft/40">
+                          {analytics.stock_summary.map((s) => (
+                            <tr key={s.stock_item_id}>
+                              <td className="px-3 py-2 font-bold text-brand-brown">
+                                {s.stock_name}{' '}
+                                <span className="font-normal text-brand-brown/70">({s.unit})</span>
+                              </td>
+                              <td className="px-3 py-2 text-right">{s.total_supplied}</td>
+                              <td className="px-3 py-2 text-right font-bold">{s.total_sold}</td>
+                              <td className="px-3 py-2 text-right">{s.total_leftover}</td>
+                              <td className="px-3 py-2 text-right font-bold">
+                                {s.opname_days === 0 ? (
+                                  <span className="text-brand-brown/65">Belum opname</span>
+                                ) : s.total_variance === 0 ? (
+                                  <span className="text-emerald-700">0</span>
+                                ) : s.total_variance < 0 ? (
+                                  <span className="text-rose-700">{s.total_variance}</span>
+                                ) : (
+                                  <span className="text-sky-700">+{s.total_variance}</span>
+                                )}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+              </section>
             </div>
           )}
         </div>
