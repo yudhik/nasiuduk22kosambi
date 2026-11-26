@@ -4,7 +4,13 @@ import { api } from '../api/client';
 import { BottomSheet } from '../components/BottomSheet';
 import type { ToastMessage } from '../components/ToastContainer';
 import type { DailyExpense, ExpenseCategory, StoreStatusResponse } from '../types';
-import { formatRupiah, formatTime, todayLocalDate } from '../utils/format';
+import {
+  formatRupiah,
+  formatThousandsInput,
+  formatTime,
+  parseThousandsInput,
+  todayLocalDate,
+} from '../utils/format';
 
 interface ExpensesPageProps {
   storeStatus: StoreStatusResponse | null;
@@ -114,7 +120,7 @@ export function ExpensesPage({ storeStatus, onToast }: ExpensesPageProps) {
 
   const handleAddExpense = async (e: React.FormEvent) => {
     e.preventDefault();
-    const amt = Number(expAmount);
+    const amt = parseThousandsInput(expAmount);
     if (!expTitle.trim() || Number.isNaN(amt) || amt <= 0) {
       setError('Isi nama pengeluaran dan nominal lebih dari 0.');
       return;
@@ -168,7 +174,7 @@ export function ExpensesPage({ storeStatus, onToast }: ExpensesPageProps) {
     setEditDate(ex.business_date);
     setEditTitle(ex.title);
     setEditCategory(ex.category);
-    setEditAmount(String(ex.amount));
+    setEditAmount(formatThousandsInput(String(ex.amount)));
     setEditNotes(ex.notes);
     setEditError(null);
   };
@@ -176,7 +182,7 @@ export function ExpensesPage({ storeStatus, onToast }: ExpensesPageProps) {
   const handleSaveEdit = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     if (!editing) return;
-    const amt = Number(editAmount);
+    const amt = parseThousandsInput(editAmount);
     if (!editTitle.trim() || Number.isNaN(amt) || amt <= 0) {
       setEditError('Isi keterangan dan nominal lebih dari 0.');
       return;
@@ -428,11 +434,11 @@ export function ExpensesPage({ storeStatus, onToast }: ExpensesPageProps) {
             ))}
           </select>
           <input
-            type="number"
-            min={1}
+            type="text"
+            inputMode="numeric"
             value={expAmount}
-            onChange={(e) => setExpAmount(e.target.value)}
-            placeholder="Nominal (Rp)"
+            onChange={(e) => setExpAmount(formatThousandsInput(e.target.value))}
+            placeholder="Nominal (cth: 25.000)"
             className="h-10 rounded-xl border border-brand-amber-soft px-3 text-xs font-bold tabular-nums text-brand-brown focus:border-brand-orange focus:outline-none sm:col-span-2"
           />
           <input
@@ -580,10 +586,11 @@ export function ExpensesPage({ storeStatus, onToast }: ExpensesPageProps) {
             <div>
               <label className="mb-1 block text-xs font-semibold text-brand-brown/80">Nominal (Rp)</label>
               <input
-                type="number"
-                min={1}
+                type="text"
+                inputMode="numeric"
                 value={editAmount}
-                onChange={(e) => setEditAmount(e.target.value)}
+                onChange={(e) => setEditAmount(formatThousandsInput(e.target.value))}
+                placeholder="25.000"
                 className="h-11 w-full rounded-xl border border-brand-amber-soft px-3.5 text-sm font-bold tabular-nums text-brand-brown focus:border-brand-orange focus:outline-none"
               />
             </div>

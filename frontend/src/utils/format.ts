@@ -6,6 +6,17 @@ export function formatRupiah(amount: number): string {
   }).format(amount);
 }
 
+export function formatThousandsInput(raw: string): string {
+  const digits = raw.replace(/\D/g, '').replace(/^0+(?=\d)/, '');
+  if (!digits) return '';
+  return digits.replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+}
+
+export function parseThousandsInput(formatted: string): number {
+  const digits = formatted.replace(/\D/g, '');
+  return digits ? Number(digits) : Number.NaN;
+}
+
 export function formatTimestamp(iso: string | null | undefined): string {
   if (!iso) return '—';
   const d = new Date(iso);
