@@ -1,0 +1,450 @@
+use axum::{
+    extract::{Path, Query, State},
+    http::{HeaderMap, StatusCode},
+    Json,
+};
+use serde::Deserialize;
+use sqlx::FromRow;
+
+use crate::{
+    auth::{
+        extract_client_ip, hash_password_async, is_timestamp_in_future, is_user_currently_locked,
+        unlock_user_by_username, AuthUser, Role,
+    },
+    db::{begin_write_tx, now_iso},
+    error::{AppError, AppResult},
+    models::{
+        AdminUserSummary, AuthEventLog, CreateUserRequest, ResetPasswordRequest,
+        UpdateUserRequest, UserRow, UserSessionLog,
+    },
+    AppState,
+};
+
+#[derive(Debug, Deserialize)]
+pub struct AuditQuery {
+    pub user_id: Option<i64>,
+    pub limit: Option<i64>,
+}
+
+#[derive(Debug, FromRow)]
+struct RawSessionRow {
+    id: i64,
+    user_id: i64,
+    username: String,
+    full_name: String,
+    role: String,
+    login_at: String,
+    logout_at: Option<String>,
+    expires_at: String,
+    ip_address: String,
+    user_agent: String,
+}
+
+fn to_summary(row: UserRow) -> AdminUserSummary {
+    let locked_now = is_user_currently_locked(&row);
+    AdminUserSummary {
+        id: row.id,
+        username: row.username,
+        full_name: row.full_name,
+        role: row.role,
+        is_active: row.is_active != 0,
+        is_env_admin: row.is_env_admin != 0,
+        failed_login_attempts: if locked_now {
+            row.failed_login_attempts
+        } else if row.is_locked != 0 {
+            0
+        } else {
+            row.failed_login_attempts
+        },
+        is_locked: locked_now,
+        locked_at: if locked_now { row.locked_at } else { None },
+        locked_until: if locked_now { row.locked_until } else { None },
+        last_login_at: row.last_login_at,
+        last_logout_at: row.last_logout_at,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+    }
+}
+
+fn validate_username(raw: &str) -> AppResult<&str> {
+    let trimmed = raw.trim();
+    if trimmed.len() < 3 || trimmed.len() > 32 {
+        return Err(AppError::Validation(
+            "Username harus terdiri dari 3 hingga 32 karakter".into(),
+        ));
+    }
+    if !trimmed
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+    {
+        return Err(AppError::Validation(
+            "Username hanya boleh berisi huruf, angka, titik (.), garis bawah (_), atau tanda hubung (-)"
+                .into(),
+        ));
+    }
+    Ok(trimmed)
+}
+
+fn validate_password(password: &str) -> AppResult<()> {
+    if password.len() < 8 {
+        return Err(AppError::Validation(
+            "Password minimal harus terdiri dari 8 karakter".into(),
+        ));
+    }
+    if password.len() > 128 {
+        return Err(AppError::Validation(
+            "Password maksimal 128 karakter".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub async fn list_users(
+    auth: AuthUser,
+    State(state): State<AppState>,
+) -> AppResult<Json<Vec<AdminUserSummary>>> {
+    auth.require_roles(&[Role::Admin])?;
+
+    let rows: Vec<UserRow> =
+        sqlx::query_as("SELECT * FROM users ORDER BY is_env_admin DESC, id ASC")
+            .fetch_all(&state.pool)
+            .await?;
+
+    Ok(Json(rows.into_iter().map(to_summary).collect()))
+}
+
+pub async fn create_user(
+    auth: AuthUser,
+    State(state): State<AppState>,
+    Json(req): Json<CreateUserRequest>,
+) -> AppResult<(StatusCode, Json<AdminUserSummary>)> {
+    auth.require_roles(&[Role::Admin])?;
+
+    let username = validate_username(&req.username)?;
+    let full_name = req.full_name.trim();
+    if full_name.is_empty() || full_name.chars().count() > 120 {
+        return Err(AppError::Validation(
+            "Nama lengkap pengguna wajib diisi (maksimal 120 karakter)".into(),
+        ));
+    }
+    validate_password(&req.password)?;
+    let role = Role::parse(&req.role).ok_or_else(|| {
+        AppError::Validation("Role harus salah satu dari: admin, owner, cashier, waiter".into())
+    })?;
+
+    let password_hash = hash_password_async(&state.hash_semaphore, req.password).await?;
+    let now = now_iso();
+
+    let mut tx = begin_write_tx(&state.pool).await?;
+    let existing: Option<(i64,)> = sqlx::query_as("SELECT id FROM users WHERE username = ?")
+        .bind(username)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+    if existing.is_some() {
+        return Err(AppError::Conflict(format!(
+            "Username '{username}' sudah digunakan"
+        )));
+    }
+
+    let res = sqlx::query(
+        r#"
+        INSERT INTO users (
+            username, full_name, password_hash, role, is_active, is_env_admin,
+            failed_login_attempts, is_locked, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, 1, 0, 0, 0, ?, ?)
+        "#,
+    )
+    .bind(username)
+    .bind(full_name)
+    .bind(&password_hash)
+    .bind(role.as_str())
+    .bind(&now)
+    .bind(&now)
+    .execute(&mut *tx)
+    .await?;
+
+    let created: UserRow = sqlx::query_as("SELECT * FROM users WHERE id = ?")
+        .bind(res.last_insert_rowid())
+        .fetch_one(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
+    Ok((StatusCode::CREATED, Json(to_summary(created))))
+}
+
+pub async fn update_user(
+    auth: AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(req): Json<UpdateUserRequest>,
+) -> AppResult<Json<AdminUserSummary>> {
+    auth.require_roles(&[Role::Admin])?;
+
+    let full_name = req.full_name.trim();
+    if full_name.is_empty() || full_name.chars().count() > 120 {
+        return Err(AppError::Validation(
+            "Nama lengkap pengguna wajib diisi (maksimal 120 karakter)".into(),
+        ));
+    }
+    let role = Role::parse(&req.role).ok_or_else(|| {
+        AppError::Validation("Role harus salah satu dari: admin, owner, cashier, waiter".into())
+    })?;
+
+    let now = now_iso();
+    let is_active = if req.is_active { 1_i64 } else { 0_i64 };
+
+    let mut tx = begin_write_tx(&state.pool).await?;
+    let target: Option<UserRow> = sqlx::query_as("SELECT * FROM users WHERE id = ?")
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+    let target =
+        target.ok_or_else(|| AppError::NotFound(format!("Pengguna #{id} tidak ditemukan")))?;
+
+    if target.is_env_admin != 0 && (role != Role::Admin || !req.is_active) {
+        return Err(AppError::Validation(
+            "Akun admin bawaan (environment variable) tidak dapat diubah perannya atau dinonaktifkan"
+                .into(),
+        ));
+    }
+
+    if target.id == auth.id && (!req.is_active || role != Role::Admin) {
+        return Err(AppError::Validation(
+            "Anda tidak dapat menonaktifkan atau menurunkan peran akun Anda sendiri".into(),
+        ));
+    }
+
+    sqlx::query(
+        r#"
+        UPDATE users
+        SET full_name = ?, role = ?, is_active = ?, updated_at = ?
+        WHERE id = ?
+        "#,
+    )
+    .bind(full_name)
+    .bind(role.as_str())
+    .bind(is_active)
+    .bind(&now)
+    .bind(id)
+    .execute(&mut *tx)
+    .await?;
+
+    if !req.is_active {
+        let revoked = sqlx::query(
+            "UPDATE user_sessions SET logout_at = ? WHERE user_id = ? AND logout_at IS NULL",
+        )
+        .bind(&now)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+
+        if revoked.rows_affected() > 0 {
+            sqlx::query("UPDATE users SET last_logout_at = ? WHERE id = ?")
+                .bind(&now)
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+        }
+    }
+
+    let updated: UserRow = sqlx::query_as("SELECT * FROM users WHERE id = ?")
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
+    Ok(Json(to_summary(updated)))
+}
+
+pub async fn reset_password(
+    auth: AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(req): Json<ResetPasswordRequest>,
+) -> AppResult<Json<AdminUserSummary>> {
+    auth.require_roles(&[Role::Admin])?;
+    validate_password(&req.new_password)?;
+
+    let password_hash = hash_password_async(&state.hash_semaphore, req.new_password).await?;
+    let now = now_iso();
+
+    let mut tx = begin_write_tx(&state.pool).await?;
+    let target: Option<UserRow> = sqlx::query_as("SELECT * FROM users WHERE id = ?")
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+    let target =
+        target.ok_or_else(|| AppError::NotFound(format!("Pengguna #{id} tidak ditemukan")))?;
+
+    if target.is_env_admin != 0 {
+        return Err(AppError::Validation(
+            "Password akun admin utama diatur melalui environment variable ADMIN_PASSWORD".into(),
+        ));
+    }
+
+    sqlx::query(
+        r#"
+        UPDATE users
+        SET password_hash = ?,
+            failed_login_attempts = 0,
+            is_locked = 0,
+            locked_at = NULL,
+            locked_until = NULL,
+            updated_at = ?
+        WHERE id = ?
+        "#,
+    )
+    .bind(&password_hash)
+    .bind(&now)
+    .bind(id)
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query("UPDATE user_sessions SET logout_at = ? WHERE user_id = ? AND logout_at IS NULL")
+        .bind(&now)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+
+    let updated: UserRow = sqlx::query_as("SELECT * FROM users WHERE id = ?")
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
+    Ok(Json(to_summary(updated)))
+}
+
+pub async fn unlock_user(
+    auth: AuthUser,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> AppResult<Json<AdminUserSummary>> {
+    auth.require_roles(&[Role::Admin])?;
+
+    let target: Option<UserRow> = sqlx::query_as("SELECT * FROM users WHERE id = ?")
+        .bind(id)
+        .fetch_optional(&state.pool)
+        .await?;
+
+    let target =
+        target.ok_or_else(|| AppError::NotFound(format!("Pengguna #{id} tidak ditemukan")))?;
+    let ip = extract_client_ip(&headers, auth.peer_addr);
+    let updated = unlock_user_by_username(
+        &state.pool,
+        &target.username,
+        &format!("Dibuka lebih awal oleh admin '{}'", auth.username),
+        &ip,
+    )
+    .await?;
+
+    Ok(Json(to_summary(updated)))
+}
+
+pub async fn list_sessions(
+    auth: AuthUser,
+    State(state): State<AppState>,
+    Query(query): Query<AuditQuery>,
+) -> AppResult<Json<Vec<UserSessionLog>>> {
+    auth.require_roles(&[Role::Admin])?;
+
+    let limit = query.limit.unwrap_or(100).clamp(1, 500);
+    let rows: Vec<RawSessionRow> = match query.user_id {
+        Some(uid) => {
+            sqlx::query_as(
+                r#"
+                SELECT
+                    s.id, s.user_id, u.username, u.full_name, u.role,
+                    s.login_at, s.logout_at, s.expires_at, s.ip_address, s.user_agent
+                FROM user_sessions s
+                INNER JOIN users u ON u.id = s.user_id
+                WHERE s.user_id = ?
+                ORDER BY s.id DESC
+                LIMIT ?
+                "#,
+            )
+            .bind(uid)
+            .bind(limit)
+            .fetch_all(&state.pool)
+            .await?
+        }
+        None => {
+            sqlx::query_as(
+                r#"
+                SELECT
+                    s.id, s.user_id, u.username, u.full_name, u.role,
+                    s.login_at, s.logout_at, s.expires_at, s.ip_address, s.user_agent
+                FROM user_sessions s
+                INNER JOIN users u ON u.id = s.user_id
+                ORDER BY s.id DESC
+                LIMIT ?
+                "#,
+            )
+            .bind(limit)
+            .fetch_all(&state.pool)
+            .await?
+        }
+    };
+
+    let logs = rows
+        .into_iter()
+        .map(|r| {
+            let status = if r.logout_at.is_some() {
+                "LOGGED_OUT"
+            } else if is_timestamp_in_future(&r.expires_at) {
+                "ACTIVE"
+            } else {
+                "EXPIRED"
+            };
+            UserSessionLog {
+                id: r.id,
+                user_id: r.user_id,
+                username: r.username,
+                full_name: r.full_name,
+                role: r.role,
+                login_at: r.login_at,
+                logout_at: r.logout_at,
+                expires_at: r.expires_at,
+                status: status.to_string(),
+                ip_address: r.ip_address,
+                user_agent: r.user_agent,
+            }
+        })
+        .collect();
+
+    Ok(Json(logs))
+}
+
+pub async fn list_auth_events(
+    auth: AuthUser,
+    State(state): State<AppState>,
+    Query(query): Query<AuditQuery>,
+) -> AppResult<Json<Vec<AuthEventLog>>> {
+    auth.require_roles(&[Role::Admin])?;
+
+    let limit = query.limit.unwrap_or(100).clamp(1, 500);
+    let rows: Vec<AuthEventLog> = match query.user_id {
+        Some(uid) => {
+            sqlx::query_as(
+                "SELECT * FROM auth_events WHERE user_id = ? ORDER BY id DESC LIMIT ?",
+            )
+            .bind(uid)
+            .bind(limit)
+            .fetch_all(&state.pool)
+            .await?
+        }
+        None => {
+            sqlx::query_as("SELECT * FROM auth_events ORDER BY id DESC LIMIT ?")
+                .bind(limit)
+                .fetch_all(&state.pool)
+                .await?
+        }
+    };
+
+    Ok(Json(rows))
+}

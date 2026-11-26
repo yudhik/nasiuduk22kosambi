@@ -1,427 +1,663 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Ban,
+  Bluetooth,
+  BluetoothConnected,
+  BluetoothOff,
   CheckCircle2,
   Clock,
+  Lock,
   Printer,
   RefreshCw,
-  X,
+  Store,
   XCircle,
 } from 'lucide-react';
 import { api } from '../api/client';
 import { BottomSheet } from '../components/BottomSheet';
-import type { OrderDetail, OrderStatus } from '../types';
+import type { ToastMessage } from '../components/ToastContainer';
+import type {
+  AuthUser,
+  OrderDetail,
+  OrderStatus,
+  SalesChannel,
+  StoreStatusResponse,
+} from '../types';
 import { formatRupiah, formatTime, todayLocalDate } from '../utils/format';
+import {
+  connectBluetoothPrinter,
+  disconnectBluetoothPrinter,
+  getBluetoothPrinterState,
+  getSavedPrinterMode,
+  printOrderSilently,
+  runThermalTestPrint,
+  setSavedPrinterMode,
+  subscribePrinterState,
+  type BluetoothPrinterState,
+  type PrinterMode,
+} from '../utils/thermalPrinter';
 
 interface CashierOrdersPageProps {
-  onPrintOrder: (order: OrderDetail) => void;
+  currentUser: AuthUser;
+  storeStatus: StoreStatusResponse | null;
+  onRefreshStoreStatus: () => Promise<void>;
+  onPrintPreview: (order: OrderDetail) => void;
   refreshSignal: number;
   onOrdersChanged: () => void;
+  onToast: (title: string, description?: string, tone?: ToastMessage['tone']) => void;
 }
 
-type FilterStatus = 'UNPAID' | 'PAID' | 'VOIDED' | 'ALL';
+type StatusFilter = 'UNPAID' | 'PAID' | 'VOIDED' | 'ALL';
 
 export function CashierOrdersPage({
-  onPrintOrder,
+  currentUser,
+  storeStatus,
+  onRefreshStoreStatus,
+  onPrintPreview,
   refreshSignal,
   onOrdersChanged,
+  onToast,
 }: CashierOrdersPageProps) {
   const [date, setDate] = useState(todayLocalDate);
-  const [statusFilter, setStatusFilter] = useState<FilterStatus>('UNPAID');
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('UNPAID');
+  const [channelFilter, setChannelFilter] = useState<number | 'ALL'>('ALL');
+  const [channels, setChannels] = useState<SalesChannel[]>([]);
   const [orders, setOrders] = useState<OrderDetail[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [actionOrderId, setActionOrderId] = useState<number | null>(null);
+  const [busyId, setBusyId] = useState<number | null>(null);
 
+  // Post-payment print-or-skip prompt
+  const [printPromptOrder, setPrintPromptOrder] = useState<OrderDetail | null>(null);
+
+  // Void modal
   const [voidTarget, setVoidTarget] = useState<OrderDetail | null>(null);
   const [voidReason, setVoidReason] = useState('');
-  const [notice, setNotice] = useState<{ text: string; order?: OrderDetail } | null>(null);
 
-  const loadOrders = async () => {
+  // Thermal Bluetooth printer state
+  const [printerMode, setPrinterMode] = useState<PrinterMode>(getSavedPrinterMode);
+  const [btState, setBtState] = useState<BluetoothPrinterState>(getBluetoothPrinterState);
+  const [connectingBt, setConnectingBt] = useState(false);
+  const [printingId, setPrintingId] = useState<number | null>(null);
+
+  const canVoidPaid = currentUser.role === 'owner' || currentUser.role === 'admin';
+  const isTodayClosed = date === todayLocalDate() && storeStatus?.status === 'CLOSED';
+
+  useEffect(() => {
+    return subscribePrinterState(() => setBtState(getBluetoothPrinterState()));
+  }, []);
+
+  const loadOrders = useCallback(async () => {
     try {
       setLoading(true);
       setError(null);
-      const data = await api.listOrders(date, 'ALL');
-      setOrders(data);
+      const [orderData, channelData] = await Promise.all([
+        api.listOrders(date, 'ALL'),
+        api.listChannels(false),
+      ]);
+      setOrders(orderData);
+      setChannels(channelData);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Gagal memuat daftar nota');
     } finally {
       setLoading(false);
     }
-  };
+  }, [date]);
 
   useEffect(() => {
     void loadOrders();
-  }, [date, refreshSignal]);
+  }, [loadOrders, refreshSignal]);
 
   const counts = useMemo(() => {
-    const unpaid = orders.filter((o) => o.status === 'UNPAID');
-    const paid = orders.filter((o) => o.status === 'PAID');
-    const voided = orders.filter((o) => o.status === 'VOIDED');
-    return {
-      UNPAID: unpaid.length,
-      PAID: paid.length,
-      VOIDED: voided.length,
-      ALL: orders.length,
-      unpaidTotal: unpaid.reduce((s, o) => s + o.total_amount, 0),
-      paidTotal: paid.reduce((s, o) => s + o.total_amount, 0),
-    };
+    let unpaid = 0;
+    let paid = 0;
+    let voided = 0;
+    for (const o of orders) {
+      if (o.status === 'UNPAID') unpaid += 1;
+      else if (o.status === 'PAID') paid += 1;
+      else if (o.status === 'VOIDED') voided += 1;
+    }
+    return { unpaid, paid, voided, all: orders.length };
   }, [orders]);
 
   const visibleOrders = useMemo(() => {
-    if (statusFilter === 'ALL') return orders;
-    return orders.filter((o) => o.status === statusFilter);
-  }, [orders, statusFilter]);
+    return orders.filter((o) => {
+      if (statusFilter !== 'ALL' && o.status !== statusFilter) return false;
+      if (channelFilter !== 'ALL' && o.channel_id !== channelFilter) return false;
+      return true;
+    });
+  }, [orders, statusFilter, channelFilter]);
 
-  const handlePay = async (order: OrderDetail) => {
+  const handleModeChange = (mode: PrinterMode) => {
+    setPrinterMode(mode);
+    setSavedPrinterMode(mode);
+  };
+
+  const handleConnectPrinter = async () => {
     try {
-      setActionOrderId(order.id);
-      setError(null);
-      const updated = await api.payOrder(order.id);
-      setOrders((prev) => prev.map((o) => (o.id === updated.id ? updated : o)));
-      setNotice({
-        text: `Nota ${updated.order_number} berhasil ditandai LUNAS.`,
-        order: updated,
-      });
-      onOrdersChanged();
+      setConnectingBt(true);
+      const state = await connectBluetoothPrinter();
+      setBtState(state);
+      onToast(
+        'Printer Bluetooth terhubung',
+        `${state.deviceName ?? 'Iware X583'} siap cetak otomatis`,
+        'success'
+      );
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Gagal memproses pembayaran');
+      onToast(
+        'Gagal menghubungkan printer',
+        err instanceof Error ? err.message : 'Periksa Bluetooth & daya printer',
+        'error'
+      );
     } finally {
-      setActionOrderId(null);
+      setConnectingBt(false);
     }
   };
 
-  const handleConfirmVoid = async (e?: React.FormEvent) => {
+  const handleTestPrint = async () => {
+    try {
+      await runThermalTestPrint(printerMode);
+      onToast('Test print terkirim ke printer 58mm', undefined, 'success');
+    } catch (err) {
+      onToast(
+        'Test print gagal',
+        err instanceof Error ? err.message : 'Pastikan printer terhubung',
+        'error'
+      );
+    }
+  };
+
+  const handlePrintOrder = async (order: OrderDetail) => {
+    try {
+      setPrintingId(order.id);
+      const result = await printOrderSilently(order, printerMode);
+      if (result === 'fallback_browser') {
+        onPrintPreview(order);
+      } else {
+        onToast(`Struk ${order.order_number} dicetak`, 'Printer thermal 58mm', 'success');
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Gagal mengirim ke printer Bluetooth';
+      onToast('Gagal cetak Bluetooth', `${msg} — membuka preview.`, 'error');
+      onPrintPreview(order);
+    } finally {
+      setPrintingId(null);
+    }
+  };
+
+  const handlePay = async (order: OrderDetail) => {
+    try {
+      setBusyId(order.id);
+      setError(null);
+      const paid = await api.payOrder(order.id);
+      onOrdersChanged();
+      await loadOrders();
+      // Offer print-or-skip choice right after payment
+      setPrintPromptOrder(paid);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Gagal menandai lunas');
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const handleVoid = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     if (!voidTarget) return;
     try {
-      setActionOrderId(voidTarget.id);
+      setBusyId(voidTarget.id);
       setError(null);
-      const updated = await api.voidOrder(voidTarget.id, voidReason.trim() || undefined);
-      setOrders((prev) => prev.map((o) => (o.id === updated.id ? updated : o)));
-      setNotice({
-        text: `Nota ${updated.order_number} dibatalkan dan stok dikembalikan.`,
-      });
+      await api.voidOrder(voidTarget.id, voidReason.trim() || undefined);
+      const num = voidTarget.order_number;
       setVoidTarget(null);
       setVoidReason('');
       onOrdersChanged();
+      await loadOrders();
+      onToast(`Nota ${num} dibatalkan`, 'Stok telah dikembalikan otomatis', 'info');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Gagal membatalkan nota');
     } finally {
-      setActionOrderId(null);
+      setBusyId(null);
     }
   };
 
   const statusBadge = (status: OrderStatus) => {
-    switch (status) {
-      case 'UNPAID':
-        return (
-          <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2.5 py-0.5 text-xs font-bold text-amber-800">
-            <Clock className="h-3.5 w-3.5" />
-            Belum Bayar
-          </span>
-        );
-      case 'PAID':
-        return (
-          <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2.5 py-0.5 text-xs font-bold text-emerald-800">
-            <CheckCircle2 className="h-3.5 w-3.5" />
-            Lunas
-          </span>
-        );
-      case 'VOIDED':
-        return (
-          <span className="inline-flex items-center gap-1 rounded-full bg-red-100 px-2.5 py-0.5 text-xs font-bold text-red-700">
-            <XCircle className="h-3.5 w-3.5" />
-            Dibatalkan
-          </span>
-        );
+    if (status === 'PAID') {
+      return (
+        <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2.5 py-0.5 text-[11px] font-bold text-emerald-700">
+          <CheckCircle2 className="h-3.5 w-3.5" />
+          Lunas
+        </span>
+      );
     }
+    if (status === 'VOIDED') {
+      return (
+        <span className="inline-flex items-center gap-1 rounded-full bg-rose-100 px-2.5 py-0.5 text-[11px] font-bold text-rose-700">
+          <XCircle className="h-3.5 w-3.5" />
+          Dibatalkan
+        </span>
+      );
+    }
+    return (
+      <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2.5 py-0.5 text-[11px] font-bold text-amber-800">
+        <Clock className="h-3.5 w-3.5" />
+        Belum Bayar
+      </span>
+    );
   };
+
+  // Block cashier when today has not been opened yet (only on today's date)
+  if (date === todayLocalDate() && storeStatus?.status === 'NOT_OPENED') {
+    return (
+      <div className="mx-auto max-w-lg rounded-3xl border border-brand-amber-soft bg-white p-8 text-center shadow-sm">
+        <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-brand-cream-deep text-brand-orange">
+          <Store className="h-7 w-7" />
+        </div>
+        <h1 className="text-lg font-extrabold text-brand-brown">Toko Belum Dibuka</h1>
+        <p className="mt-2 text-sm text-brand-brown/70">
+          Pemilik atau Administrator perlu mengisi stok awal harian dan menekan &ldquo;Buka Toko&rdquo; terlebih dahulu.
+        </p>
+        <button
+          type="button"
+          onClick={() => void onRefreshStoreStatus()}
+          className="mt-5 inline-flex h-11 items-center gap-2 rounded-xl bg-brand-orange px-5 text-sm font-bold text-white shadow-sm hover:bg-brand-orange-dark"
+        >
+          <RefreshCw className="h-4 w-4" />
+          <span>Periksa Status Toko</span>
+        </button>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-4">
-      {/* Header & Date Filter */}
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+      {/* Header & Date */}
+      <div className="flex flex-wrap items-center justify-between gap-2.5">
         <div>
-          <h1 className="text-lg font-bold text-slate-900 sm:text-xl">
-            Kasir &amp; Daftar Nota
-          </h1>
-          <p className="text-xs text-slate-500 sm:text-sm">
-            Proses pembayaran konsumen, cetak nota, atau batalkan nota belum bayar.
+          <h1 className="text-lg font-extrabold text-brand-brown sm:text-xl">Kasir &amp; Daftar Nota</h1>
+          <p className="text-xs text-brand-brown/70 sm:text-sm">
+            Proses pembayaran, batalkan nota, dan cetak struk 58mm Bluetooth.
           </p>
         </div>
+
         <div className="flex items-center gap-2">
           <input
             type="date"
             value={date}
             onChange={(e) => setDate(e.target.value)}
-            className="h-10 flex-1 rounded-xl border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-700 sm:flex-none"
+            className="h-10 rounded-xl border border-brand-amber-soft bg-white px-3 text-xs font-bold text-brand-brown focus:border-brand-orange focus:outline-none sm:text-sm"
           />
           <button
             type="button"
             onClick={() => void loadOrders()}
-            className="inline-flex h-10 items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-700 active:scale-95 hover:bg-slate-50"
+            className="inline-flex h-10 items-center gap-1.5 rounded-xl border border-brand-amber-soft bg-white px-3 text-xs font-bold text-brand-brown hover:bg-brand-cream-deep"
           >
             <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
-            <span className="hidden sm:inline">Muat Ulang</span>
+            <span className="hidden sm:inline">Segarkan</span>
           </button>
         </div>
       </div>
 
-      {/* Compact 2-column totals strip even on narrow Android screens */}
-      <div className="grid grid-cols-2 gap-2.5 sm:gap-4">
-        <div className="rounded-2xl border border-amber-200 bg-amber-50/80 p-3.5 sm:p-4">
-          <p className="text-[11px] font-bold uppercase tracking-wide text-amber-800">
-            Belum Bayar ({counts.UNPAID})
-          </p>
-          <p className="mt-1 text-lg font-extrabold text-amber-900 sm:text-2xl">
-            {formatRupiah(counts.unpaidTotal)}
-          </p>
-        </div>
-        <div className="rounded-2xl border border-emerald-200 bg-emerald-50/80 p-3.5 sm:p-4">
-          <p className="text-[11px] font-bold uppercase tracking-wide text-emerald-800">
-            Lunas ({counts.PAID})
-          </p>
-          <p className="mt-1 text-lg font-extrabold text-emerald-900 sm:text-2xl">
-            {formatRupiah(counts.paidTotal)}
-          </p>
-        </div>
-      </div>
-
-      {notice && (
-        <div className="flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-medium text-emerald-900">
-          <span>{notice.text}</span>
-          <div className="flex items-center gap-2">
-            {notice.order && (
-              <button
-                type="button"
-                onClick={() => onPrintOrder(notice.order!)}
-                className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-bold text-white hover:bg-emerald-700"
-              >
-                <Printer className="h-3.5 w-3.5" />
-                Cetak Struk
-              </button>
-            )}
-            <button
-              type="button"
-              onClick={() => setNotice(null)}
-              className="rounded-lg p-1 text-emerald-700 hover:bg-emerald-100"
-            >
-              <X className="h-4 w-4" />
-            </button>
-          </div>
+      {isTodayClosed && (
+        <div className="flex items-center gap-2.5 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs font-semibold text-rose-800 sm:text-sm">
+          <Lock className="h-4 w-4 shrink-0 text-rose-600" />
+          <span>
+            Toko hari ini sudah ditutup. Daftar nota hanya dapat dilihat dan dicetak (pembayaran &amp; pembatalan terkunci).
+          </span>
         </div>
       )}
 
+      {/* 58mm Thermal Bluetooth Printer Bar (Iware X583) */}
+      <div className="rounded-2xl border border-brand-amber-soft bg-white p-3.5 shadow-sm">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2.5">
+            <div
+              className={`flex h-9 w-9 items-center justify-center rounded-xl ${
+                printerMode === 'ble' && btState.connected
+                  ? 'bg-emerald-100 text-emerald-700'
+                  : 'bg-brand-cream-deep text-brand-orange'
+              }`}
+            >
+              {printerMode === 'ble' && btState.connected ? (
+                <BluetoothConnected className="h-5 w-5" />
+              ) : (
+                <Bluetooth className="h-5 w-5" />
+              )}
+            </div>
+            <div>
+              <p className="text-xs font-extrabold text-brand-brown sm:text-sm">
+                Printer Thermal 58mm (Iware X583)
+              </p>
+              <p className="text-[11px] text-brand-brown/65">
+                {printerMode === 'ble'
+                  ? btState.connected
+                    ? `Terhubung: ${btState.deviceName} • Cetak 1-klik otomatis`
+                    : 'Hubungkan sekali di awal shift untuk cetak langsung tanpa popup'
+                  : printerMode === 'rawbt'
+                    ? 'Mode RawBT Android • Cetak otomatis via aplikasi RawBT'
+                    : 'Mode Preview Browser • Membuka dialog print biasa'}
+              </p>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <select
+              value={printerMode}
+              onChange={(e) => handleModeChange(e.target.value as PrinterMode)}
+              className="h-9 rounded-xl border border-brand-amber-soft bg-brand-cream px-2.5 text-xs font-bold text-brand-brown focus:border-brand-orange focus:outline-none"
+            >
+              <option value="ble">BLE Langsung (58mm)</option>
+              <option value="rawbt">RawBT Android (58mm)</option>
+              <option value="browser">Preview Browser</option>
+            </select>
+
+            {printerMode === 'ble' &&
+              (btState.connected ? (
+                <button
+                  type="button"
+                  onClick={disconnectBluetoothPrinter}
+                  className="inline-flex h-9 items-center gap-1.5 rounded-xl border border-rose-200 bg-rose-50 px-3 text-xs font-bold text-rose-700 hover:bg-rose-100"
+                >
+                  <BluetoothOff className="h-3.5 w-3.5" />
+                  <span>Putuskan</span>
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  disabled={connectingBt}
+                  onClick={() => void handleConnectPrinter()}
+                  className="inline-flex h-9 items-center gap-1.5 rounded-xl bg-brand-orange px-3 text-xs font-bold text-white shadow-sm hover:bg-brand-orange-dark disabled:opacity-60"
+                >
+                  <Bluetooth className="h-3.5 w-3.5" />
+                  <span>{connectingBt ? 'Menghubungkan...' : 'Hubungkan Printer'}</span>
+                </button>
+              ))}
+
+            {(printerMode === 'rawbt' || (printerMode === 'ble' && btState.connected)) && (
+              <button
+                type="button"
+                onClick={() => void handleTestPrint()}
+                className="inline-flex h-9 items-center gap-1.5 rounded-xl border border-brand-amber-soft bg-white px-3 text-xs font-bold text-brand-brown hover:bg-brand-cream-deep"
+              >
+                <Printer className="h-3.5 w-3.5" />
+                <span>Test Print</span>
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Status & Channel Filter Pills */}
+      <div className="space-y-2">
+        <div className="no-scrollbar flex flex-nowrap gap-2 overflow-x-auto pb-0.5">
+          {(
+            [
+              { key: 'UNPAID', label: `Belum Bayar (${counts.unpaid})` },
+              { key: 'PAID', label: `Lunas (${counts.paid})` },
+              { key: 'VOIDED', label: `Batal (${counts.voided})` },
+              { key: 'ALL', label: `Semua (${counts.all})` },
+            ] as Array<{ key: StatusFilter; label: string }>
+          ).map((tab) => (
+            <button
+              key={tab.key}
+              type="button"
+              onClick={() => setStatusFilter(tab.key)}
+              className={`h-9 shrink-0 rounded-full px-4 text-xs font-bold transition ${
+                statusFilter === tab.key
+                  ? 'bg-brand-orange text-white shadow-sm'
+                  : 'bg-white text-brand-brown ring-1 ring-brand-amber-soft hover:bg-brand-cream-deep'
+              }`}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+
+        <div className="no-scrollbar flex flex-nowrap gap-1.5 overflow-x-auto pb-0.5">
+          <button
+            type="button"
+            onClick={() => setChannelFilter('ALL')}
+            className={`h-8 shrink-0 rounded-full px-3 text-[11px] font-bold transition ${
+              channelFilter === 'ALL'
+                ? 'bg-brand-brown text-brand-cream'
+                : 'bg-white text-brand-brown/80 ring-1 ring-brand-amber-soft'
+            }`}
+          >
+            Semua Channel
+          </button>
+          {channels.map((ch) => (
+            <button
+              key={ch.id}
+              type="button"
+              onClick={() => setChannelFilter(ch.id)}
+              className={`h-8 shrink-0 rounded-full px-3 text-[11px] font-bold transition ${
+                channelFilter === ch.id
+                  ? 'bg-brand-brown text-brand-cream'
+                  : 'bg-white text-brand-brown/80 ring-1 ring-brand-amber-soft'
+              }`}
+            >
+              {ch.name}
+            </button>
+          ))}
+        </div>
+      </div>
+
       {error && (
-        <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-700">
+        <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-medium text-rose-700">
           {error}
         </div>
       )}
 
-      {/* Horizontal swipeable Status Filter Pills */}
-      <div className="no-scrollbar flex flex-nowrap gap-2 overflow-x-auto pb-1">
-        {(
-          [
-            ['UNPAID', 'Belum Bayar'],
-            ['PAID', 'Lunas'],
-            ['VOIDED', 'Dibatalkan'],
-            ['ALL', 'Semua'],
-          ] as Array<[FilterStatus, string]>
-        ).map(([key, label]) => (
-          <button
-            key={key}
-            type="button"
-            onClick={() => setStatusFilter(key)}
-            className={`inline-flex h-10 shrink-0 items-center gap-1.5 rounded-full px-4 text-xs font-bold transition active:scale-95 sm:text-sm ${
-              statusFilter === key
-                ? 'bg-slate-900 text-white shadow-sm'
-                : 'bg-white text-slate-600 ring-1 ring-slate-200 hover:bg-slate-100'
-            }`}
-          >
-            <span>{label}</span>
-            <span
-              className={`rounded-full px-1.5 py-0.5 text-[11px] ${
-                statusFilter === key
-                  ? 'bg-white/20 text-white'
-                  : 'bg-slate-100 text-slate-700'
-              }`}
-            >
-              {counts[key]}
-            </span>
-          </button>
-        ))}
-      </div>
-
-      {/* Orders Grid */}
+      {/* Orders List */}
       {loading ? (
-        <div className="rounded-2xl border border-slate-200 bg-white p-10 text-center text-sm text-slate-500">
+        <div className="rounded-2xl border border-brand-amber-soft bg-white p-10 text-center text-sm text-brand-brown/60">
           Memuat daftar nota...
         </div>
       ) : visibleOrders.length === 0 ? (
-        <div className="rounded-2xl border border-slate-200 bg-white p-10 text-center text-sm text-slate-500">
-          Tidak ada nota pada filter ini untuk tanggal {date}.
+        <div className="rounded-2xl border border-brand-amber-soft bg-white p-10 text-center text-sm text-brand-brown/60">
+          Tidak ada nota untuk filter yang dipilih.
         </div>
       ) : (
-        <div className="grid grid-cols-1 gap-3.5 md:grid-cols-2">
-          {visibleOrders.map((order) => (
-            <div
-              key={order.id}
-              className="flex flex-col justify-between rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:p-5"
-            >
-              <div>
-                <div className="flex items-start justify-between gap-2">
-                  <div className="min-w-0">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="font-mono text-sm font-extrabold text-slate-900">
-                        {order.order_number}
-                      </span>
-                      {statusBadge(order.status)}
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+          {visibleOrders.map((order) => {
+            const allowVoidThisOrder =
+              !isTodayClosed &&
+              (order.status === 'UNPAID' || (order.status === 'PAID' && canVoidPaid));
+
+            return (
+              <div
+                key={order.id}
+                className="flex flex-col justify-between rounded-2xl border border-brand-amber-soft bg-white p-4 shadow-sm"
+              >
+                <div>
+                  <div className="flex flex-wrap items-start justify-between gap-2">
+                    <div>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span className="font-mono text-sm font-extrabold text-brand-brown">
+                          {order.order_number}
+                        </span>
+                        <span className="rounded-full bg-brand-cream-deep px-2 py-0.5 text-[11px] font-bold text-brand-brown">
+                          {order.channel_name}
+                        </span>
+                        {statusBadge(order.status)}
+                      </div>
+                      <p className="mt-1 text-xs text-brand-brown/65">
+                        {formatTime(order.created_at)}
+                        {order.customer_label ? ` • ${order.customer_label}` : ''}
+                        {order.waiter_name ? ` • @${order.waiter_name}` : ''}
+                      </p>
                     </div>
-                    <p className="mt-1 text-xs text-slate-500">
-                      {formatTime(order.created_at)}
-                      {order.customer_label ? ` • ${order.customer_label}` : ''}
-                      {order.waiter_name ? ` • Pelayan: ${order.waiter_name}` : ''}
-                    </p>
+                    <div className="text-right">
+                      <p className="text-base font-extrabold text-brand-orange">
+                        {formatRupiah(order.total_amount)}
+                      </p>
+                    </div>
                   </div>
-                  <p className="shrink-0 text-base font-extrabold text-slate-900 sm:text-lg">
-                    {formatRupiah(order.total_amount)}
-                  </p>
+
+                  {/* Items */}
+                  <div className="mt-3 space-y-1.5 border-t border-brand-amber-soft/50 pt-2.5 text-xs">
+                    {order.items.map((item) => (
+                      <div key={item.id} className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <span className="font-semibold text-brand-brown">
+                            {item.quantity}× {item.menu_name_snapshot}
+                          </span>
+                          {item.item_note && (
+                            <p className="text-[11px] italic text-brand-brown/60">
+                              Catatan: {item.item_note}
+                            </p>
+                          )}
+                        </div>
+                        <span className="shrink-0 font-semibold text-brand-brown/80">
+                          {formatRupiah(item.subtotal)}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+
+                  {order.notes && (
+                    <p className="mt-2 rounded-lg bg-brand-cream px-2.5 py-1.5 text-[11px] text-brand-brown/80">
+                      <strong>Catatan:</strong> {order.notes}
+                    </p>
+                  )}
+
+                  {order.void_reason && (
+                    <p className="mt-2 rounded-lg bg-rose-50 px-2.5 py-1.5 text-[11px] text-rose-700">
+                      <strong>Alasan Batal:</strong> {order.void_reason}
+                    </p>
+                  )}
                 </div>
 
-                <ul className="mt-3 divide-y divide-slate-100 rounded-xl bg-slate-50 px-3 py-1 text-sm">
-                  {order.items.map((item) => (
-                    <li
-                      key={item.id}
-                      className="flex items-start justify-between gap-2 py-2"
-                    >
-                      <div className="min-w-0">
-                        <span className="font-bold text-slate-900">{item.quantity}×</span>{' '}
-                        <span className="text-slate-700">{item.menu_name_snapshot}</span>
-                        {item.item_note && (
-                          <p className="text-xs italic text-slate-500">
-                            Catatan: {item.item_note}
-                          </p>
-                        )}
-                      </div>
-                      <span className="shrink-0 font-semibold text-slate-700">
-                        {formatRupiah(item.subtotal)}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-
-                {order.notes && (
-                  <p className="mt-2.5 text-xs text-slate-600">
-                    <span className="font-semibold">Catatan:</span> {order.notes}
-                  </p>
-                )}
-
-                {order.void_reason && (
-                  <p className="mt-2.5 rounded-xl bg-red-50 px-3 py-2 text-xs text-red-700">
-                    <span className="font-bold">Alasan batal:</span> {order.void_reason}
-                  </p>
-                )}
-              </div>
-
-              {/* Thumb-safe Action Area: Primary CTA separated from Void */}
-              <div className="mt-4 space-y-2 border-t border-slate-100 pt-3.5">
-                {order.status === 'UNPAID' ? (
-                  <>
+                {/* Action Footer */}
+                <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-brand-amber-soft/50 pt-3">
+                  {order.status === 'UNPAID' && !isTodayClosed && (
                     <button
                       type="button"
-                      disabled={actionOrderId === order.id}
+                      disabled={busyId === order.id}
                       onClick={() => void handlePay(order)}
-                      className="flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 text-sm font-bold text-white shadow-sm active:scale-[0.99] hover:bg-emerald-700 disabled:opacity-50"
+                      className="inline-flex h-10 flex-1 items-center justify-center gap-1.5 rounded-xl bg-emerald-600 px-3 text-xs font-bold text-white shadow-sm hover:bg-emerald-700 disabled:opacity-60"
                     >
-                      <CheckCircle2 className="h-5 w-5" />
-                      {actionOrderId === order.id
-                        ? 'Memproses Pembayaran...'
-                        : `Tandai Lunas • ${formatRupiah(order.total_amount)}`}
+                      <CheckCircle2 className="h-4 w-4" />
+                      <span>{busyId === order.id ? 'Memproses...' : 'Tandai Lunas'}</span>
                     </button>
-                    <div className="grid grid-cols-2 gap-2">
-                      <button
-                        type="button"
-                        onClick={() => onPrintOrder(order)}
-                        className="inline-flex h-10 items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-white text-xs font-bold text-slate-700 active:scale-98 hover:bg-slate-50"
-                      >
-                        <Printer className="h-4 w-4" />
-                        Cetak Nota
-                      </button>
-                      <button
-                        type="button"
-                        disabled={actionOrderId === order.id}
-                        onClick={() => {
-                          setVoidTarget(order);
-                          setVoidReason('');
-                        }}
-                        className="inline-flex h-10 items-center justify-center gap-1.5 rounded-xl border border-red-200 bg-red-50 text-xs font-bold text-red-700 active:scale-98 hover:bg-red-100 disabled:opacity-50"
-                      >
-                        <Ban className="h-4 w-4" />
-                        Batalkan
-                      </button>
-                    </div>
-                  </>
-                ) : (
+                  )}
+
                   <button
                     type="button"
-                    onClick={() => onPrintOrder(order)}
-                    className="inline-flex h-10 w-full items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-white text-xs font-bold text-slate-700 active:scale-98 hover:bg-slate-50"
+                    disabled={printingId === order.id}
+                    onClick={() => void handlePrintOrder(order)}
+                    className="inline-flex h-10 items-center justify-center gap-1.5 rounded-xl bg-brand-orange px-3.5 text-xs font-bold text-white shadow-sm hover:bg-brand-orange-dark disabled:opacity-60"
                   >
                     <Printer className="h-4 w-4" />
-                    Lihat &amp; Cetak Ulang Nota
+                    <span>{printingId === order.id ? 'Mencetak...' : 'Cetak'}</span>
                   </button>
-                )}
+
+                  {allowVoidThisOrder && (
+                    <button
+                      type="button"
+                      disabled={busyId === order.id}
+                      onClick={() => {
+                        setVoidTarget(order);
+                        setVoidReason('');
+                      }}
+                      className="inline-flex h-10 items-center justify-center gap-1 rounded-xl border border-rose-200 bg-rose-50 px-3 text-xs font-bold text-rose-700 hover:bg-rose-100"
+                    >
+                      <Ban className="h-3.5 w-3.5" />
+                      <span>Batal</span>
+                    </button>
+                  )}
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
+
+      {/* Post-Payment Print-or-Skip Prompt */}
+      <BottomSheet
+        open={Boolean(printPromptOrder)}
+        title="Pembayaran Berhasil (LUNAS)"
+        subtitle={
+          printPromptOrder
+            ? `${printPromptOrder.order_number} • ${formatRupiah(printPromptOrder.total_amount)}`
+            : ''
+        }
+        onClose={() => setPrintPromptOrder(null)}
+        footer={
+          <div className="grid grid-cols-2 gap-2.5">
+            <button
+              type="button"
+              onClick={() => setPrintPromptOrder(null)}
+              className="h-12 rounded-xl border border-brand-amber-soft bg-white text-sm font-bold text-brand-brown"
+            >
+              Tidak, Lewati
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                const target = printPromptOrder;
+                setPrintPromptOrder(null);
+                if (target) void handlePrintOrder(target);
+              }}
+              className="inline-flex h-12 items-center justify-center gap-2 rounded-xl bg-brand-orange text-sm font-bold text-white shadow-sm hover:bg-brand-orange-dark"
+            >
+              <Printer className="h-4 w-4" />
+              <span>Cetak Struk</span>
+            </button>
+          </div>
+        }
+      >
+        <p className="text-sm text-brand-brown/80">
+          Apakah Anda ingin mencetak struk nota ini sekarang?
+          {printerMode === 'ble' && btState.connected && (
+            <span className="mt-1 block text-xs font-semibold text-emerald-700">
+              Akan langsung tercetak otomatis ke {btState.deviceName} tanpa popup tambahan.
+            </span>
+          )}
+        </p>
+      </BottomSheet>
 
       {/* Void Confirmation BottomSheet */}
       <BottomSheet
         open={Boolean(voidTarget)}
-        title={voidTarget ? `Batalkan ${voidTarget.order_number}?` : ''}
-        subtitle="Stok seluruh item pada nota ini akan otomatis dikembalikan."
+        title={`Batalkan Nota ${voidTarget?.order_number ?? ''}`}
+        subtitle={
+          voidTarget?.status === 'PAID'
+            ? 'Nota ini sudah LUNAS. Pembatalan oleh Pemilik/Admin akan mengembalikan semua stok terkait.'
+            : 'Stok yang sudah terpotong akan otomatis dikembalikan.'
+        }
         onClose={() => setVoidTarget(null)}
         footer={
           <div className="grid grid-cols-2 gap-2.5">
             <button
               type="button"
               onClick={() => setVoidTarget(null)}
-              className="h-11 rounded-xl border border-slate-200 bg-white text-sm font-semibold text-slate-700 hover:bg-slate-50"
+              className="h-11 rounded-xl border border-brand-amber-soft bg-white text-sm font-semibold text-brand-brown"
             >
               Kembali
             </button>
             <button
               type="button"
-              disabled={!voidTarget || actionOrderId === voidTarget.id}
-              onClick={() => void handleConfirmVoid()}
-              className="h-11 rounded-xl bg-red-600 text-sm font-bold text-white hover:bg-red-700 disabled:opacity-50"
+              disabled={busyId !== null}
+              onClick={() => void handleVoid()}
+              className="h-11 rounded-xl bg-rose-600 text-sm font-bold text-white hover:bg-rose-700 disabled:opacity-60"
             >
-              Ya, Batalkan Nota
+              Konfirmasi Batal
             </button>
           </div>
         }
       >
-        <form onSubmit={handleConfirmVoid} className="space-y-3">
-          <div className="rounded-xl bg-red-50 p-3 text-xs text-red-800">
-            Status nota akan berubah menjadi <strong>DIBATALKAN</strong> dan tidak akan
-            dihitung dalam total pendapatan harian.
-          </div>
-          <div>
-            <label className="mb-1 block text-xs font-semibold text-slate-700">
-              Alasan Pembatalan (Opsional)
-            </label>
-            <input
-              type="text"
-              value={voidReason}
-              onChange={(e) => setVoidReason(e.target.value)}
-              placeholder="cth: Salah input jumlah / konsumen batal"
-              className="h-11 w-full rounded-xl border border-slate-200 px-3.5 text-base sm:text-sm focus:border-red-500 focus:outline-none"
-              autoFocus
-            />
-          </div>
+        <form onSubmit={handleVoid}>
+          <label className="mb-1 block text-xs font-semibold text-brand-brown/80">
+            Alasan Pembatalan (Opsional)
+          </label>
+          <input
+            type="text"
+            value={voidReason}
+            onChange={(e) => setVoidReason(e.target.value)}
+            placeholder="cth: Salah input / Pelanggan batal"
+            className="h-11 w-full rounded-xl border border-brand-amber-soft px-3.5 text-sm text-brand-brown focus:border-brand-orange focus:outline-none"
+            autoFocus
+          />
         </form>
       </BottomSheet>
     </div>

@@ -6,55 +6,143 @@ use axum::{
     Json,
 };
 use serde::Deserialize;
+use sqlx::FromRow;
 
 use crate::{
-    db::{ensure_daily_snapshot, now_iso, today_date},
+    auth::{AuthUser, Role},
+    db::{
+        begin_write_tx, ensure_daily_stock_snapshot, get_store_day_status_tx, now_business_and_iso,
+        parse_business_date,
+    },
     error::{AppError, AppResult},
-    models::{CreateOrderRequest, MenuItem, OrderDetail, OrderItemDetail, OrderRow, VoidOrderRequest},
+    models::{
+        CreateOrderRequest, MenuItemRow, OrderDetail, OrderItemDetail, OrderRow, SalesChannel,
+        StockItem, VoidOrderRequest,
+    },
     AppState,
 };
+
+const MAX_ORDER_ITEMS: usize = 200;
+const MAX_ITEM_QTY: i64 = 10_000;
 
 #[derive(Debug, Deserialize)]
 pub struct OrderQuery {
     pub date: Option<String>,
     pub status: Option<String>,
+    pub channel_id: Option<i64>,
+}
+
+#[derive(Debug, FromRow)]
+struct StockReqRow {
+    stock_item_id: i64,
+    qty_per_unit: i64,
+}
+
+#[derive(Debug, FromRow)]
+struct OrderStockDeductionRow {
+    stock_item_id: i64,
+    quantity: i64,
 }
 
 pub async fn create_order(
+    auth: AuthUser,
     State(state): State<AppState>,
     Json(req): Json<CreateOrderRequest>,
 ) -> AppResult<(StatusCode, Json<OrderDetail>)> {
+    auth.require_roles(&[Role::Waiter, Role::Owner, Role::Admin])?;
     if req.items.is_empty() {
         return Err(AppError::Validation(
             "Nota harus memiliki minimal 1 item makanan/minuman".into(),
         ));
     }
-
-    let mut requested_totals: HashMap<i64, i64> = HashMap::new();
-    for item in &req.items {
-        if item.quantity <= 0 {
-            return Err(AppError::Validation(
-                "Jumlah pesanan setiap item harus lebih dari 0".into(),
-            ));
-        }
-        *requested_totals.entry(item.menu_item_id).or_insert(0) += item.quantity;
+    if req.items.len() > MAX_ORDER_ITEMS {
+        return Err(AppError::Validation(format!(
+            "Jumlah baris item dalam satu nota maksimal {MAX_ORDER_ITEMS}"
+        )));
     }
 
-    let today = today_date();
-    let now = now_iso();
-    let customer_label = req.customer_label.unwrap_or_default().trim().to_string();
-    let waiter_name = req.waiter_name.unwrap_or_default().trim().to_string();
-    let notes = req.notes.unwrap_or_default().trim().to_string();
+    let mut requested_menu_totals: HashMap<i64, i64> = HashMap::new();
+    for item in &req.items {
+        if item.quantity <= 0 || item.quantity > MAX_ITEM_QTY {
+            return Err(AppError::Validation(format!(
+                "Jumlah pesanan setiap item harus antara 1 hingga {MAX_ITEM_QTY}"
+            )));
+        }
+        let entry = requested_menu_totals.entry(item.menu_item_id).or_insert(0);
+        *entry = entry
+            .checked_add(item.quantity)
+            .ok_or_else(|| AppError::Validation("Total jumlah pesanan melebihi batas".into()))?;
+    }
 
-    let mut tx = state.pool.begin().await?;
+    let (today, now) = now_business_and_iso();
+    let customer_label: String = req
+        .customer_label
+        .unwrap_or_default()
+        .trim()
+        .chars()
+        .take(120)
+        .collect();
+    // Waiter identity is strictly locked to the authenticated user's username
+    let waiter_name = auth.username.clone();
+    let notes: String = req
+        .notes
+        .unwrap_or_default()
+        .trim()
+        .chars()
+        .take(500)
+        .collect();
 
-    // Fetch and validate all referenced menu items + stock sufficiency up front
-    let mut menu_map: HashMap<i64, MenuItem> = HashMap::new();
-    for (&menu_id, &total_qty) in &requested_totals {
-        let menu: Option<MenuItem> = sqlx::query_as("SELECT * FROM menu_items WHERE id = ?")
-            .bind(menu_id)
-            .fetch_optional(&mut *tx)
-            .await?;
+    let mut tx = begin_write_tx(&state.pool).await?;
+
+    // Store must be OPEN for today before any orders can be created
+    let store_status = get_store_day_status_tx(&mut tx, &today).await?;
+    if store_status == "NOT_OPENED" {
+        return Err(AppError::Conflict(
+            "Toko belum dibuka hari ini. Pemilik/Admin harus mengisi stok awal dan membuka toko terlebih dahulu."
+                .into(),
+        ));
+    }
+    if store_status == "CLOSED" {
+        return Err(AppError::Conflict(
+            "Toko hari ini sudah ditutup. Tidak dapat membuat nota baru.".into(),
+        ));
+    }
+
+    // Resolve single sales channel (defaults to 'regular')
+    let channel: Option<SalesChannel> = match req.channel_id {
+        Some(cid) => {
+            sqlx::query_as("SELECT * FROM sales_channels WHERE id = ?")
+                .bind(cid)
+                .fetch_optional(&mut *tx)
+                .await?
+        }
+        None => {
+            sqlx::query_as("SELECT * FROM sales_channels WHERE code = 'regular' LIMIT 1")
+                .fetch_optional(&mut *tx)
+                .await?
+        }
+    };
+    let channel = channel.ok_or_else(|| {
+        AppError::Validation("Channel penjualan tidak ditemukan".into())
+    })?;
+    if channel.is_active == 0 {
+        return Err(AppError::Validation(format!(
+            "Channel '{}' sedang tidak aktif",
+            channel.name
+        )));
+    }
+
+    // Fetch menus and aggregate total required quantity per stock_item_id using checked arithmetic
+    let mut menu_map: HashMap<i64, MenuItemRow> = HashMap::new();
+    let mut required_stock_totals: HashMap<i64, i64> = HashMap::new();
+
+    for (&menu_id, &total_qty) in &requested_menu_totals {
+        let menu: Option<MenuItemRow> = sqlx::query_as(
+            "SELECT id, name, category, price, is_active, created_at, updated_at FROM menu_items WHERE id = ?",
+        )
+        .bind(menu_id)
+        .fetch_optional(&mut *tx)
+        .await?;
 
         let menu = menu.ok_or_else(|| {
             AppError::NotFound(format!("Menu dengan ID #{menu_id} tidak ditemukan"))
@@ -67,22 +155,75 @@ pub async fn create_order(
             )));
         }
 
-        if menu.current_stock < total_qty {
-            return Err(AppError::InsufficientStock {
-                menu_name: menu.name,
-                available: menu.current_stock,
-                requested: total_qty,
-            });
+        let reqs: Vec<StockReqRow> = sqlx::query_as(
+            "SELECT stock_item_id, qty_per_unit FROM menu_stock_requirements WHERE menu_item_id = ?",
+        )
+        .bind(menu_id)
+        .fetch_all(&mut *tx)
+        .await?;
+
+        if reqs.is_empty() {
+            return Err(AppError::Validation(format!(
+                "Menu '{}' belum terhubung ke item stok manapun",
+                menu.name
+            )));
+        }
+
+        for r in reqs {
+            let needed = r
+                .qty_per_unit
+                .checked_mul(total_qty)
+                .ok_or_else(|| AppError::Validation("Jumlah stok terlalu besar".into()))?;
+            let stock_total = required_stock_totals.entry(r.stock_item_id).or_insert(0);
+            *stock_total = stock_total
+                .checked_add(needed)
+                .ok_or_else(|| AppError::Validation("Total kebutuhan stok terlalu besar".into()))?;
         }
 
         menu_map.insert(menu_id, menu);
     }
 
-    // Calculate total amount
+    // Validate all linked stock items exist, are active, and have sufficient stock
+    let mut stock_map: HashMap<i64, StockItem> = HashMap::new();
+    for (&stock_id, &needed_qty) in &required_stock_totals {
+        let stock: Option<StockItem> = sqlx::query_as("SELECT * FROM stock_items WHERE id = ?")
+            .bind(stock_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+
+        let stock = stock.ok_or_else(|| {
+            AppError::NotFound(format!("Item stok #{stock_id} tidak ditemukan"))
+        })?;
+
+        if stock.is_active == 0 {
+            return Err(AppError::Validation(format!(
+                "Item stok '{}' sedang tidak aktif",
+                stock.name
+            )));
+        }
+
+        if stock.current_stock < needed_qty {
+            return Err(AppError::InsufficientStock {
+                menu_name: stock.name,
+                available: stock.current_stock,
+                requested: needed_qty,
+            });
+        }
+
+        stock_map.insert(stock_id, stock);
+    }
+
+    // Calculate total amount safely
     let mut total_amount: i64 = 0;
     for item in &req.items {
         let menu = &menu_map[&item.menu_item_id];
-        total_amount += menu.price * item.quantity;
+        let line_total = menu
+            .price
+            .checked_mul(item.quantity)
+            .ok_or_else(|| AppError::Validation("Total harga melebihi batas".into()))?;
+        total_amount = total_amount
+            .checked_add(line_total)
+            .ok_or_else(|| AppError::Validation("Total nota melebihi batas".into()))?;
     }
 
     // Generate sequential daily order number: NOTA-YYYYMMDD-001
@@ -94,31 +235,48 @@ pub async fn create_order(
     let date_compact = today.replace('-', "");
     let order_number = format!("NOTA-{}-{:03}", date_compact, existing_count.0 + 1);
 
+    let is_auto_paid = channel.is_auto_paid != 0;
+    let initial_status = if is_auto_paid { "PAID" } else { "UNPAID" };
+    let paid_at: Option<&str> = if is_auto_paid { Some(&now) } else { None };
+
     let order_res = sqlx::query(
         r#"
         INSERT INTO orders (
-            order_number, business_date, customer_label, waiter_name, notes, status, total_amount, created_at
+            order_number, business_date, channel_id, channel_name_snapshot,
+            customer_label, waiter_name, created_by_user_id, notes, status,
+            total_amount, created_at, paid_at
         )
-        VALUES (?, ?, ?, ?, ?, 'UNPAID', ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(&order_number)
     .bind(&today)
+    .bind(channel.id)
+    .bind(&channel.name)
     .bind(&customer_label)
     .bind(&waiter_name)
+    .bind(auth.id)
     .bind(&notes)
+    .bind(initial_status)
     .bind(total_amount)
     .bind(&now)
+    .bind(paid_at)
     .execute(&mut *tx)
     .await?;
 
     let order_id = order_res.last_insert_rowid();
 
-    // Insert order items with locked snapshots of name and price
     for item in &req.items {
         let menu = &menu_map[&item.menu_item_id];
         let subtotal = menu.price * item.quantity;
-        let item_note = item.item_note.as_deref().unwrap_or("").trim();
+        let item_note: String = item
+            .item_note
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .chars()
+            .take(200)
+            .collect();
 
         sqlx::query(
             r#"
@@ -134,67 +292,86 @@ pub async fn create_order(
         .bind(menu.price)
         .bind(item.quantity)
         .bind(subtotal)
-        .bind(item_note)
+        .bind(&item_note)
         .execute(&mut *tx)
         .await?;
     }
 
-    // Atomically deduct stock, update daily snapshots, and record stock movements
-    for (&menu_id, &total_qty) in &requested_totals {
-        let menu = &menu_map[&menu_id];
-        ensure_daily_snapshot(&mut tx, &today, menu_id, menu.current_stock, &now).await?;
+    for (&stock_id, &needed_qty) in &required_stock_totals {
+        let stock = &stock_map[&stock_id];
+        ensure_daily_stock_snapshot(&mut tx, &today, stock_id, stock.current_stock, &now).await?;
 
-        let stock_after = menu.current_stock - total_qty;
+        let stock_after = stock
+            .current_stock
+            .checked_sub(needed_qty)
+            .ok_or_else(|| AppError::InsufficientStock {
+                menu_name: stock.name.clone(),
+                available: stock.current_stock,
+                requested: needed_qty,
+            })?;
         let updated = sqlx::query(
             r#"
-            UPDATE menu_items
+            UPDATE stock_items
             SET current_stock = current_stock - ?, updated_at = ?
             WHERE id = ? AND is_active = 1 AND current_stock >= ?
             "#,
         )
-        .bind(total_qty)
+        .bind(needed_qty)
         .bind(&now)
-        .bind(menu_id)
-        .bind(total_qty)
+        .bind(stock_id)
+        .bind(needed_qty)
         .execute(&mut *tx)
         .await?;
 
         if updated.rows_affected() != 1 {
             return Err(AppError::InsufficientStock {
-                menu_name: menu.name.clone(),
-                available: menu.current_stock,
-                requested: total_qty,
+                menu_name: stock.name.clone(),
+                available: stock.current_stock,
+                requested: needed_qty,
             });
         }
 
         sqlx::query(
             r#"
-            UPDATE daily_stock_snapshots
-            SET sold_qty = sold_qty + ?, updated_at = ?
-            WHERE business_date = ? AND menu_item_id = ?
+            INSERT INTO order_stock_deductions (order_id, stock_item_id, stock_name_snapshot, quantity)
+            VALUES (?, ?, ?, ?)
             "#,
         )
-        .bind(total_qty)
-        .bind(&now)
-        .bind(&today)
-        .bind(menu_id)
+        .bind(order_id)
+        .bind(stock_id)
+        .bind(&stock.name)
+        .bind(needed_qty)
         .execute(&mut *tx)
         .await?;
 
         sqlx::query(
             r#"
-            INSERT INTO stock_movements (
-                business_date, menu_item_id, order_id, movement_type, qty_delta, stock_after, note, created_at
+            UPDATE daily_stock_item_snapshots
+            SET sold_qty = sold_qty + ?, updated_at = ?
+            WHERE business_date = ? AND stock_item_id = ?
+            "#,
+        )
+        .bind(needed_qty)
+        .bind(&now)
+        .bind(&today)
+        .bind(stock_id)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO stock_item_movements (
+                business_date, stock_item_id, order_id, movement_type, qty_delta, stock_after, note, created_at
             )
             VALUES (?, ?, ?, 'ORDER_DEDUCT', ?, ?, ?, ?)
             "#,
         )
         .bind(&today)
-        .bind(menu_id)
+        .bind(stock_id)
         .bind(order_id)
-        .bind(-total_qty)
+        .bind(-needed_qty)
         .bind(stock_after)
-        .bind(format!("Pesanan {order_number}"))
+        .bind(format!("Pesanan {order_number} ({})", channel.name))
         .bind(&now)
         .execute(&mut *tx)
         .await?;
@@ -218,16 +395,12 @@ pub async fn create_order(
 }
 
 pub async fn list_orders(
+    auth: AuthUser,
     State(state): State<AppState>,
     Query(query): Query<OrderQuery>,
 ) -> AppResult<Json<Vec<OrderDetail>>> {
-    let business_date = query
-        .date
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(today_date);
+    auth.require_roles(&[Role::Cashier, Role::Owner, Role::Admin])?;
+    let business_date = parse_business_date(query.date.as_deref())?;
 
     let status_filter = query
         .status
@@ -236,40 +409,105 @@ pub async fn list_orders(
         .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("ALL"))
         .map(|s| s.to_uppercase());
 
-    let orders: Vec<OrderRow> = match status_filter {
-        Some(status) => {
-            sqlx::query_as(
-                "SELECT * FROM orders WHERE business_date = ? AND status = ? ORDER BY id DESC",
-            )
-            .bind(&business_date)
-            .bind(&status)
-            .fetch_all(&state.pool)
-            .await?
-        }
-        None => {
-            sqlx::query_as("SELECT * FROM orders WHERE business_date = ? ORDER BY id DESC")
+    let (orders, all_items): (Vec<OrderRow>, Vec<OrderItemDetail>) =
+        match (status_filter, query.channel_id) {
+            (Some(status), Some(cid)) => {
+                let o = sqlx::query_as(
+                    "SELECT * FROM orders WHERE business_date = ? AND status = ? AND channel_id = ? ORDER BY id DESC",
+                )
+                .bind(&business_date)
+                .bind(&status)
+                .bind(cid)
+                .fetch_all(&state.pool)
+                .await?;
+                let i = sqlx::query_as(
+                    r#"
+                    SELECT oi.*
+                    FROM order_items oi
+                    INNER JOIN orders o ON o.id = oi.order_id
+                    WHERE o.business_date = ? AND o.status = ? AND o.channel_id = ?
+                    ORDER BY oi.id ASC
+                    "#,
+                )
+                .bind(&business_date)
+                .bind(&status)
+                .bind(cid)
+                .fetch_all(&state.pool)
+                .await?;
+                (o, i)
+            }
+            (Some(status), None) => {
+                let o = sqlx::query_as(
+                    "SELECT * FROM orders WHERE business_date = ? AND status = ? ORDER BY id DESC",
+                )
+                .bind(&business_date)
+                .bind(&status)
+                .fetch_all(&state.pool)
+                .await?;
+                let i = sqlx::query_as(
+                    r#"
+                    SELECT oi.*
+                    FROM order_items oi
+                    INNER JOIN orders o ON o.id = oi.order_id
+                    WHERE o.business_date = ? AND o.status = ?
+                    ORDER BY oi.id ASC
+                    "#,
+                )
+                .bind(&business_date)
+                .bind(&status)
+                .fetch_all(&state.pool)
+                .await?;
+                (o, i)
+            }
+            (None, Some(cid)) => {
+                let o = sqlx::query_as(
+                    "SELECT * FROM orders WHERE business_date = ? AND channel_id = ? ORDER BY id DESC",
+                )
+                .bind(&business_date)
+                .bind(cid)
+                .fetch_all(&state.pool)
+                .await?;
+                let i = sqlx::query_as(
+                    r#"
+                    SELECT oi.*
+                    FROM order_items oi
+                    INNER JOIN orders o ON o.id = oi.order_id
+                    WHERE o.business_date = ? AND o.channel_id = ?
+                    ORDER BY oi.id ASC
+                    "#,
+                )
+                .bind(&business_date)
+                .bind(cid)
+                .fetch_all(&state.pool)
+                .await?;
+                (o, i)
+            }
+            (None, None) => {
+                let o = sqlx::query_as(
+                    "SELECT * FROM orders WHERE business_date = ? ORDER BY id DESC",
+                )
                 .bind(&business_date)
                 .fetch_all(&state.pool)
-                .await?
-        }
-    };
+                .await?;
+                let i = sqlx::query_as(
+                    r#"
+                    SELECT oi.*
+                    FROM order_items oi
+                    INNER JOIN orders o ON o.id = oi.order_id
+                    WHERE o.business_date = ?
+                    ORDER BY oi.id ASC
+                    "#,
+                )
+                .bind(&business_date)
+                .fetch_all(&state.pool)
+                .await?;
+                (o, i)
+            }
+        };
 
     if orders.is_empty() {
         return Ok(Json(Vec::new()));
     }
-
-    let all_items: Vec<OrderItemDetail> = sqlx::query_as(
-        r#"
-        SELECT oi.*
-        FROM order_items oi
-        INNER JOIN orders o ON o.id = oi.order_id
-        WHERE o.business_date = ?
-        ORDER BY oi.id ASC
-        "#,
-    )
-    .bind(&business_date)
-    .fetch_all(&state.pool)
-    .await?;
 
     let mut items_by_order: HashMap<i64, Vec<OrderItemDetail>> = HashMap::new();
     for item in all_items {
@@ -288,9 +526,11 @@ pub async fn list_orders(
 }
 
 pub async fn get_order(
+    auth: AuthUser,
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> AppResult<Json<OrderDetail>> {
+    auth.require_roles(&[Role::Cashier, Role::Owner, Role::Admin])?;
     let order: Option<OrderRow> = sqlx::query_as("SELECT * FROM orders WHERE id = ?")
         .bind(id)
         .fetch_optional(&state.pool)
@@ -307,11 +547,13 @@ pub async fn get_order(
 }
 
 pub async fn pay_order(
+    auth: AuthUser,
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> AppResult<Json<OrderDetail>> {
-    let now = now_iso();
-    let mut tx = state.pool.begin().await?;
+    auth.require_roles(&[Role::Cashier, Role::Owner, Role::Admin])?;
+    let (_today, now) = now_business_and_iso();
+    let mut tx = begin_write_tx(&state.pool).await?;
 
     let order: Option<OrderRow> = sqlx::query_as("SELECT * FROM orders WHERE id = ?")
         .bind(id)
@@ -319,6 +561,13 @@ pub async fn pay_order(
         .await?;
 
     let order = order.ok_or_else(|| AppError::NotFound(format!("Nota #{id} tidak ditemukan")))?;
+
+    let day_status = get_store_day_status_tx(&mut tx, &order.business_date).await?;
+    if day_status == "CLOSED" {
+        return Err(AppError::Conflict(
+            "Toko untuk tanggal nota ini sudah ditutup.".into(),
+        ));
+    }
 
     match order.status.as_str() {
         "UNPAID" => {}
@@ -352,18 +601,20 @@ pub async fn pay_order(
 }
 
 pub async fn void_order(
+    auth: AuthUser,
     State(state): State<AppState>,
     Path(id): Path<i64>,
     payload: Option<Json<VoidOrderRequest>>,
 ) -> AppResult<Json<OrderDetail>> {
-    let reason = payload
+    auth.require_roles(&[Role::Cashier, Role::Owner, Role::Admin])?;
+    let reason: String = payload
         .and_then(|Json(body)| body.reason)
-        .map(|s| s.trim().to_string())
+        .map(|s| s.trim().chars().take(500).collect::<String>())
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "Dibatalkan sebelum pembayaran".to_string());
+        .unwrap_or_else(|| format!("Dibatalkan oleh {}", auth.username));
 
-    let now = now_iso();
-    let mut tx = state.pool.begin().await?;
+    let (today, now) = now_business_and_iso();
+    let mut tx = begin_write_tx(&state.pool).await?;
 
     let order: Option<OrderRow> = sqlx::query_as("SELECT * FROM orders WHERE id = ?")
         .bind(id)
@@ -372,12 +623,22 @@ pub async fn void_order(
 
     let order = order.ok_or_else(|| AppError::NotFound(format!("Nota #{id} tidak ditemukan")))?;
 
+    let day_status = get_store_day_status_tx(&mut tx, &order.business_date).await?;
+    if day_status == "CLOSED" {
+        return Err(AppError::Conflict(
+            "Toko untuk tanggal nota ini sudah ditutup. Nota tidak dapat dibatalkan.".into(),
+        ));
+    }
+
     match order.status.as_str() {
         "UNPAID" => {}
         "PAID" => {
-            return Err(AppError::Conflict(
-                "Nota yang sudah lunas tidak dapat dibatalkan".into(),
-            ))
+            if !matches!(auth.role, Role::Owner | Role::Admin) {
+                return Err(AppError::Forbidden(
+                    "Hanya Pemilik atau Administrator yang dapat membatalkan nota yang sudah LUNAS"
+                        .into(),
+                ));
+            }
         }
         "VOIDED" => {
             return Err(AppError::Conflict(
@@ -393,57 +654,77 @@ pub async fn void_order(
             .fetch_all(&mut *tx)
             .await?;
 
-    let mut restore_by_menu: HashMap<i64, i64> = HashMap::new();
-    for item in &items {
-        *restore_by_menu.entry(item.menu_item_id).or_insert(0) += item.quantity;
-    }
+    // Only restore into live `stock_items.current_stock` if the order belongs to today AND today is OPEN
+    // (prevents cross-day voiding from ever corrupting today's live inventory)
+    let is_live_today = order.business_date == today && day_status == "OPEN";
 
-    for (menu_id, qty) in restore_by_menu {
+    let deductions: Vec<OrderStockDeductionRow> = sqlx::query_as(
+        "SELECT stock_item_id, quantity FROM order_stock_deductions WHERE order_id = ?",
+    )
+    .bind(id)
+    .fetch_all(&mut *tx)
+    .await?;
+
+    for ded in deductions {
         let (current_stock,): (i64,) =
-            sqlx::query_as("SELECT current_stock FROM menu_items WHERE id = ?")
-                .bind(menu_id)
+            sqlx::query_as("SELECT current_stock FROM stock_items WHERE id = ?")
+                .bind(ded.stock_item_id)
                 .fetch_one(&mut *tx)
                 .await?;
 
-        let stock_after = current_stock + qty;
+        let stock_after = if is_live_today {
+            let next = current_stock
+                .checked_add(ded.quantity)
+                .ok_or_else(|| AppError::Validation("Stok melebihi batas".into()))?;
+            sqlx::query("UPDATE stock_items SET current_stock = ?, updated_at = ? WHERE id = ?")
+                .bind(next)
+                .bind(&now)
+                .bind(ded.stock_item_id)
+                .execute(&mut *tx)
+                .await?;
+            next
+        } else {
+            current_stock
+        };
 
-        sqlx::query("UPDATE menu_items SET current_stock = ?, updated_at = ? WHERE id = ?")
-            .bind(stock_after)
-            .bind(&now)
-            .bind(menu_id)
-            .execute(&mut *tx)
-            .await?;
+        ensure_daily_stock_snapshot(
+            &mut tx,
+            &order.business_date,
+            ded.stock_item_id,
+            current_stock,
+            &now,
+        )
+        .await?;
 
-        ensure_daily_snapshot(&mut tx, &order.business_date, menu_id, current_stock, &now).await?;
         sqlx::query(
             r#"
-            UPDATE daily_stock_snapshots
+            UPDATE daily_stock_item_snapshots
             SET sold_qty = MAX(0, sold_qty - ?),
                 voided_qty = voided_qty + ?,
                 updated_at = ?
-            WHERE business_date = ? AND menu_item_id = ?
+            WHERE business_date = ? AND stock_item_id = ?
             "#,
         )
-        .bind(qty)
-        .bind(qty)
+        .bind(ded.quantity)
+        .bind(ded.quantity)
         .bind(&now)
         .bind(&order.business_date)
-        .bind(menu_id)
+        .bind(ded.stock_item_id)
         .execute(&mut *tx)
         .await?;
 
         sqlx::query(
             r#"
-            INSERT INTO stock_movements (
-                business_date, menu_item_id, order_id, movement_type, qty_delta, stock_after, note, created_at
+            INSERT INTO stock_item_movements (
+                business_date, stock_item_id, order_id, movement_type, qty_delta, stock_after, note, created_at
             )
             VALUES (?, ?, ?, 'ORDER_VOID_RESTORE', ?, ?, ?, ?)
             "#,
         )
         .bind(&order.business_date)
-        .bind(menu_id)
+        .bind(ded.stock_item_id)
         .bind(order.id)
-        .bind(qty)
+        .bind(ded.quantity)
         .bind(stock_after)
         .bind(format!("Pembatalan {}: {}", order.order_number, reason))
         .bind(&now)

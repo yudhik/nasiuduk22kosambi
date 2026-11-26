@@ -1,18 +1,17 @@
 import { useState } from 'react';
 import { Printer, X } from 'lucide-react';
-import type { OrderDetail } from '../types';
+import { STORE_NAME, type OrderDetail } from '../types';
 import { formatDateTime, formatRupiah } from '../utils/format';
 
 interface ReceiptPrintViewProps {
   order: OrderDetail | null;
-  shopName: string;
   onClose: () => void;
 }
 
 type PaperSize = '58' | '80' | 'a4';
 
-export function ReceiptPrintView({ order, shopName, onClose }: ReceiptPrintViewProps) {
-  const [paperSize, setPaperSize] = useState<PaperSize>('80');
+export function ReceiptPrintView({ order, onClose }: ReceiptPrintViewProps) {
+  const [paperSize, setPaperSize] = useState<PaperSize>('58');
 
   if (!order) return null;
 
@@ -32,35 +31,33 @@ export function ReceiptPrintView({ order, shopName, onClose }: ReceiptPrintViewP
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-end justify-center bg-slate-900/60 sm:items-center sm:p-4 print:static print:block print:bg-white print:p-0"
+      className="fixed inset-0 z-50 flex items-end justify-center bg-brand-brown/60 sm:items-center sm:p-4 print:static print:block print:bg-white print:p-0"
       onClick={onClose}
     >
       <div
         className="flex max-h-[92dvh] w-full flex-col overflow-hidden rounded-t-3xl bg-white shadow-2xl sm:max-w-xl sm:rounded-2xl print:max-h-none print:max-w-none print:rounded-none print:shadow-none"
         onClick={(e) => e.stopPropagation()}
       >
-        {/* Mobile grab handle */}
         <div className="no-print flex justify-center pt-2.5 sm:hidden">
-          <div className="h-1.5 w-12 rounded-full bg-slate-300" />
+          <div className="h-1.5 w-12 rounded-full bg-brand-amber-soft" />
         </div>
 
-        {/* Modal header & paper switcher - hidden during print */}
-        <div className="no-print space-y-2.5 border-b border-slate-200 bg-slate-50 px-4 py-3 sm:px-5">
+        <div className="no-print space-y-2.5 border-b border-brand-amber-soft bg-brand-cream px-4 py-3 sm:px-5">
           <div className="flex items-center justify-between gap-2">
-            <h3 className="text-sm font-bold text-slate-900 sm:text-base">
+            <h3 className="text-sm font-bold text-brand-brown sm:text-base">
               Preview Nota {order.order_number}
             </h3>
             <button
               type="button"
               onClick={onClose}
-              className="flex h-9 w-9 items-center justify-center rounded-full bg-slate-200/70 text-slate-600 hover:bg-slate-200"
+              className="flex h-9 w-9 items-center justify-center rounded-full bg-brand-cream-deep text-brand-brown hover:bg-brand-amber-soft"
               aria-label="Tutup preview"
             >
               <X className="h-5 w-5" />
             </button>
           </div>
 
-          <div className="grid grid-cols-3 gap-1.5 rounded-xl bg-slate-200/70 p-1">
+          <div className="grid grid-cols-3 gap-1.5 rounded-xl bg-brand-cream-deep p-1">
             {(['58', '80', 'a4'] as PaperSize[]).map((size) => (
               <button
                 key={size}
@@ -68,8 +65,8 @@ export function ReceiptPrintView({ order, shopName, onClose }: ReceiptPrintViewP
                 onClick={() => setPaperSize(size)}
                 className={`h-9 rounded-lg text-xs font-bold transition ${
                   paperSize === size
-                    ? 'bg-white text-emerald-700 shadow-sm'
-                    : 'text-slate-600 hover:text-slate-900'
+                    ? 'bg-white text-brand-orange shadow-sm'
+                    : 'text-brand-brown/70 hover:text-brand-brown'
                 }`}
               >
                 {size === 'a4' ? 'Standar A4' : `Thermal ${size}mm`}
@@ -79,13 +76,12 @@ export function ReceiptPrintView({ order, shopName, onClose }: ReceiptPrintViewP
         </div>
 
         {/* Printable Receipt Body */}
-        <div className="flex-1 overflow-y-auto bg-slate-100 p-4 sm:p-6 print:overflow-visible print:bg-white print:p-0">
+        <div className="flex-1 overflow-y-auto bg-brand-cream/70 p-4 sm:p-6 print:overflow-visible print:bg-white print:p-0">
           <div
-            className={`print-only-container mx-auto rounded-xl border border-slate-200 bg-white p-5 font-mono text-xs text-slate-900 shadow-sm ${paperClass}`}
+            className={`print-only-container mx-auto rounded-xl border border-brand-amber-soft bg-white p-5 font-mono text-xs text-slate-900 shadow-sm ${paperClass}`}
           >
             <div className="border-b border-dashed border-slate-400 pb-3 text-center">
-              <h2 className="text-base font-bold uppercase tracking-wide">{shopName}</h2>
-              <p className="mt-0.5 text-[11px] text-slate-600">Nota Pesanan Digital</p>
+              <h2 className="text-sm font-bold uppercase tracking-wide">{STORE_NAME}</h2>
             </div>
 
             <div className="space-y-1 border-b border-dashed border-slate-400 py-2.5 text-[11px]">
@@ -97,6 +93,10 @@ export function ReceiptPrintView({ order, shopName, onClose }: ReceiptPrintViewP
                 <span className="text-slate-600">Waktu</span>
                 <span>{formatDateTime(order.created_at)}</span>
               </div>
+              <div className="flex justify-between gap-2">
+                <span className="text-slate-600">Channel</span>
+                <span className="font-semibold">{order.channel_name}</span>
+              </div>
               {order.customer_label && (
                 <div className="flex justify-between gap-2">
                   <span className="text-slate-600">Pelanggan</span>
@@ -106,7 +106,7 @@ export function ReceiptPrintView({ order, shopName, onClose }: ReceiptPrintViewP
               {order.waiter_name && (
                 <div className="flex justify-between gap-2">
                   <span className="text-slate-600">Pelayan</span>
-                  <span>{order.waiter_name}</span>
+                  <span>@{order.waiter_name}</span>
                 </div>
               )}
               <div className="flex justify-between gap-2">
@@ -167,15 +167,14 @@ export function ReceiptPrintView({ order, shopName, onClose }: ReceiptPrintViewP
           </div>
         </div>
 
-        {/* Sticky Print CTA Footer - hidden during print */}
-        <div className="no-print border-t border-slate-200 bg-white px-4 py-3 pb-safe sm:px-5">
+        <div className="no-print border-t border-brand-amber-soft bg-white px-4 py-3 pb-safe sm:px-5">
           <button
             type="button"
             onClick={() => window.print()}
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 text-sm font-bold text-white shadow-sm active:scale-[0.99] hover:bg-emerald-700"
+            className="flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-brand-orange text-sm font-bold text-white shadow-sm hover:bg-brand-orange-dark active:scale-[0.99]"
           >
             <Printer className="h-5 w-5" />
-            Cetak Nota Sekarang
+            Cetak via Browser
           </button>
         </div>
       </div>

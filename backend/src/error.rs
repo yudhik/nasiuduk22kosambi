@@ -24,6 +24,21 @@ pub enum AppError {
     #[error("{0}")]
     Conflict(String),
 
+    #[error("{0}")]
+    Unauthorized(String),
+
+    #[error("{0}")]
+    Forbidden(String),
+
+    #[error("{0}")]
+    Locked(String),
+
+    #[error("{0}")]
+    TooManyRequests(String),
+
+    #[error("{0}")]
+    Internal(String),
+
     #[error("Terjadi kesalahan database: {0}")]
     Database(#[from] sqlx::Error),
 }
@@ -45,7 +60,38 @@ impl IntoResponse for AppError {
                 self.to_string(),
             ),
             AppError::Conflict(msg) => (StatusCode::CONFLICT, "CONFLICT", msg.clone()),
+            AppError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, "UNAUTHORIZED", msg.clone()),
+            AppError::Forbidden(msg) => (StatusCode::FORBIDDEN, "FORBIDDEN", msg.clone()),
+            AppError::Locked(msg) => (StatusCode::LOCKED, "ACCOUNT_LOCKED", msg.clone()),
+            AppError::TooManyRequests(msg) => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "TOO_MANY_REQUESTS",
+                msg.clone(),
+            ),
+            AppError::Internal(msg) => {
+                tracing::error!(error = %msg, "internal error");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "INTERNAL_ERROR",
+                    "Terjadi kesalahan internal pada server".to_string(),
+                )
+            }
             AppError::Database(err) => {
+                // Map SQLite UNIQUE constraint violation (2067) to 409 Conflict as defense-in-depth
+                if let sqlx::Error::Database(db_err) = err {
+                    if db_err.code().as_deref() == Some("2067")
+                        || db_err.code().as_deref() == Some("1555")
+                    {
+                        return (
+                            StatusCode::CONFLICT,
+                            Json(ErrorBody {
+                                code: "CONFLICT",
+                                error: "Data duplikat atau sudah terdaftar".to_string(),
+                            }),
+                        )
+                            .into_response();
+                    }
+                }
                 tracing::error!(error = %err, "database error");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,

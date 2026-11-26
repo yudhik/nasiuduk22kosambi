@@ -1,0 +1,41 @@
+[Unit]
+Description=NotaDigital POS & Daily Stock Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nota-digital
+Group=nota-digital
+WorkingDirectory=/opt/nota-digital
+# Store sensitive ADMIN_USERNAME and ADMIN_PASSWORD in /etc/nota-digital.env (chown root:nota-digital, chmod 640)
+EnvironmentFile=-/etc/nota-digital.env
+Environment=HOST=127.0.0.1
+Environment=PORT=3000
+Environment=DATABASE_URL=sqlite:///opt/nota-digital/data/nota_digital.db?mode=rwc
+Environment=STATIC_DIR=/opt/nota-digital/static
+Environment=TZ=Asia/Jakarta
+Environment=SEED_SAMPLE_DATA=false
+Environment=AUTH_MAX_FAILED_ATTEMPTS=3
+Environment=AUTH_LOCKOUT_MINUTES=15
+Environment=SESSION_TTL_HOURS=12
+Environment=COOKIE_SECURE=true
+Environment=RUST_LOG=nota_digital_backend=info,tower_http=info
+ExecStart=/opt/nota-digital/nota-digital-backend
+Restart=always
+RestartSec=3
+
+# Security hardening (non-root + strict filesystem isolation + memory cap)
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+ReadWritePaths=/opt/nota-digital/data
+MemoryMax=512M
+
+[Install]
+WantedBy=multi-user.target

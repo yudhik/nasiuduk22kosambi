@@ -27,6 +27,20 @@ export function formatDateTime(iso: string): string {
   });
 }
 
+export function formatDateTimeSeconds(iso: string | null | undefined): string {
+  if (!iso) return '—';
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return iso;
+  return date.toLocaleString('id-ID', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+}
+
 export function todayLocalDate(): string {
   const d = new Date();
   const y = d.getFullYear();

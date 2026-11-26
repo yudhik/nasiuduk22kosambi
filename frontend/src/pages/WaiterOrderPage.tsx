@@ -1,20 +1,22 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
-  CheckCircle2,
   ChevronRight,
   ClipboardList,
+  Lock,
   Minus,
   Plus,
-  Printer,
   RefreshCw,
   Search,
   ShoppingBag,
+  Store,
   Trash2,
+  UserCheck,
   X,
 } from 'lucide-react';
 import { api } from '../api/client';
 import { BottomSheet } from '../components/BottomSheet';
-import type { MenuItem, OrderDetail } from '../types';
+import type { ToastMessage } from '../components/ToastContainer';
+import type { AuthUser, MenuItem, SalesChannel, StoreStatusResponse } from '../types';
 import { formatRupiah } from '../utils/format';
 
 interface CartEntry {
@@ -24,12 +26,23 @@ interface CartEntry {
 }
 
 interface WaiterOrderPageProps {
-  onPrintOrder: (order: OrderDetail) => void;
+  currentUser: AuthUser;
+  storeStatus: StoreStatusResponse | null;
+  onRefreshStoreStatus: () => Promise<void>;
   onOrderCreated: () => void;
+  onToast: (title: string, description?: string, tone?: ToastMessage['tone']) => void;
 }
 
-export function WaiterOrderPage({ onPrintOrder, onOrderCreated }: WaiterOrderPageProps) {
+export function WaiterOrderPage({
+  currentUser,
+  storeStatus,
+  onRefreshStoreStatus,
+  onOrderCreated,
+  onToast,
+}: WaiterOrderPageProps) {
   const [menus, setMenus] = useState<MenuItem[]>([]);
+  const [channels, setChannels] = useState<SalesChannel[]>([]);
+  const [selectedChannelId, setSelectedChannelId] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
@@ -38,19 +51,26 @@ export function WaiterOrderPage({ onPrintOrder, onOrderCreated }: WaiterOrderPag
   const [cart, setCart] = useState<Record<number, CartEntry>>({});
   const [cartSheetOpen, setCartSheetOpen] = useState(false);
   const [customerLabel, setCustomerLabel] = useState('');
-  const [waiterName, setWaiterName] = useState(
-    () => localStorage.getItem('nota_waiter_name') ?? ''
-  );
   const [orderNotes, setOrderNotes] = useState('');
   const [submitting, setSubmitting] = useState(false);
-  const [lastOrder, setLastOrder] = useState<OrderDetail | null>(null);
 
-  const loadMenus = async () => {
+  const loadData = async () => {
     try {
       setLoading(true);
       setError(null);
-      const data = await api.listMenus(true);
-      setMenus(data);
+      const [menuData, channelData] = await Promise.all([
+        api.listMenus(true),
+        api.listChannels(true),
+      ]);
+      setMenus(menuData);
+      setChannels(channelData);
+      if (channelData.length > 0) {
+        setSelectedChannelId((prev) => {
+          if (prev && channelData.some((c) => c.id === prev)) return prev;
+          const regular = channelData.find((c) => c.code.toLowerCase() === 'regular');
+          return regular ? regular.id : channelData[0].id;
+        });
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Gagal memuat daftar menu');
     } finally {
@@ -59,8 +79,36 @@ export function WaiterOrderPage({ onPrintOrder, onOrderCreated }: WaiterOrderPag
   };
 
   useEffect(() => {
-    void loadMenus();
-  }, []);
+    void loadData();
+  }, [storeStatus?.status]);
+
+  const selectedChannel = useMemo(
+    () => channels.find((c) => c.id === selectedChannelId) ?? null,
+    [channels, selectedChannelId]
+  );
+
+  // Compute remaining stock per stock_item_id after accounting for items already in the current cart
+  const cartUsedByStockId = useMemo(() => {
+    const used: Record<number, number> = {};
+    for (const entry of Object.values(cart)) {
+      for (const req of entry.menu.stock_requirements) {
+        used[req.stock_item_id] = (used[req.stock_item_id] ?? 0) + req.qty_per_unit * entry.quantity;
+      }
+    }
+    return used;
+  }, [cart]);
+
+  const remainingForMenu = (menu: MenuItem): number => {
+    if (menu.stock_requirements.length === 0) return 0;
+    let minMore = Infinity;
+    for (const req of menu.stock_requirements) {
+      const used = cartUsedByStockId[req.stock_item_id] ?? 0;
+      const left = Math.max(0, req.stock_current - used);
+      const possible = Math.floor(left / req.qty_per_unit);
+      if (possible < minMore) minMore = possible;
+    }
+    return Number.isFinite(minMore) ? minMore : 0;
+  };
 
   const categories = useMemo(() => {
     const set = new Set(menus.map((m) => m.category));
@@ -89,6 +137,9 @@ export function WaiterOrderPage({ onPrintOrder, onOrderCreated }: WaiterOrderPag
   );
 
   const updateQuantity = (menu: MenuItem, delta: number) => {
+    if (delta > 0 && remainingForMenu(menu) < delta) {
+      return;
+    }
     setCart((prev) => {
       const current = prev[menu.id];
       const nextQty = (current?.quantity ?? 0) + delta;
@@ -96,9 +147,6 @@ export function WaiterOrderPage({ onPrintOrder, onOrderCreated }: WaiterOrderPag
         const clone = { ...prev };
         delete clone[menu.id];
         return clone;
-      }
-      if (nextQty > menu.current_stock) {
-        return prev;
       }
       return {
         ...prev,
@@ -124,17 +172,14 @@ export function WaiterOrderPage({ onPrintOrder, onOrderCreated }: WaiterOrderPag
 
   const handleSubmitOrder = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    if (cartItems.length === 0) return;
+    if (cartItems.length === 0 || !selectedChannelId) return;
 
     try {
       setSubmitting(true);
       setError(null);
-      if (waiterName.trim()) {
-        localStorage.setItem('nota_waiter_name', waiterName.trim());
-      }
       const created = await api.createOrder({
+        channel_id: selectedChannelId,
         customer_label: customerLabel.trim() || undefined,
-        waiter_name: waiterName.trim() || undefined,
         notes: orderNotes.trim() || undefined,
         items: cartItems.map((entry) => ({
           menu_item_id: entry.menu.id,
@@ -143,119 +188,194 @@ export function WaiterOrderPage({ onPrintOrder, onOrderCreated }: WaiterOrderPag
         })),
       });
 
-      setLastOrder(created);
       setCart({});
       setCustomerLabel('');
       setOrderNotes('');
       setCartSheetOpen(false);
       onOrderCreated();
-      await loadMenus();
+
+      // Non-blocking growl toast — waiter can keep creating new orders immediately without clicking X
+      const statusText = created.status === 'PAID' ? 'Otomatis Lunas' : 'Belum Bayar';
+      onToast(
+        `Nota ${created.order_number} tersimpan`,
+        `${created.channel_name} • ${formatRupiah(created.total_amount)} (${statusText})`,
+        'success'
+      );
+
+      await loadData();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Gagal membuat nota');
-      await loadMenus();
+      const msg = err instanceof Error ? err.message : 'Gagal membuat nota';
+      setError(msg);
+      onToast('Gagal membuat nota', msg, 'error');
+      await loadData();
+      await onRefreshStoreStatus();
     } finally {
       setSubmitting(false);
     }
   };
 
+  // Block order creation when store is NOT_OPENED or CLOSED
+  if (storeStatus && storeStatus.status !== 'OPEN') {
+    const isClosed = storeStatus.status === 'CLOSED';
+    return (
+      <div className="mx-auto max-w-lg rounded-3xl border border-brand-amber-soft bg-white p-8 text-center shadow-sm">
+        <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-brand-cream-deep text-brand-brown">
+          {isClosed ? <Lock className="h-7 w-7 text-rose-600" /> : <Store className="h-7 w-7 text-brand-orange" />}
+        </div>
+        <h1 className="text-lg font-extrabold text-brand-brown">
+          {isClosed ? 'Toko Sudah Ditutup Hari Ini' : 'Toko Belum Dibuka'}
+        </h1>
+        <p className="mt-2 text-sm text-brand-brown/70">
+          {isClosed
+            ? 'Operasional hari ini telah selesai dan stok sudah direset. Pemesanan baru dapat dilakukan saat toko dibuka kembali besok.'
+            : 'Pemilik atau Administrator perlu mengisi stok awal harian dan menekan "Buka Toko" sebelum pelayan dapat mencatat nota.'}
+        </p>
+        <button
+          type="button"
+          onClick={() => void onRefreshStoreStatus()}
+          className="mt-5 inline-flex h-11 items-center gap-2 rounded-xl bg-brand-orange px-5 text-sm font-bold text-white shadow-sm hover:bg-brand-orange-dark"
+        >
+          <RefreshCw className="h-4 w-4" />
+          <span>Periksa Status Toko</span>
+        </button>
+      </div>
+    );
+  }
+
   const renderCartFields = () => (
     <div className="space-y-4">
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-1">
+      {/* Single Channel Selector (1 channel per nota) */}
+      <div>
+        <label className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-brand-brown/75">
+          Channel Penjualan (Pilih 1)
+        </label>
+        <div className="grid grid-cols-2 gap-2">
+          {channels.map((ch) => {
+            const active = selectedChannelId === ch.id;
+            return (
+              <button
+                key={ch.id}
+                type="button"
+                onClick={() => setSelectedChannelId(ch.id)}
+                className={`flex flex-col items-start rounded-xl border px-3 py-2 text-left transition ${
+                  active
+                    ? 'border-brand-orange bg-brand-orange text-white shadow-sm'
+                    : 'border-brand-amber-soft bg-white text-brand-brown hover:bg-brand-cream'
+                }`}
+              >
+                <span className="text-xs font-extrabold">{ch.name}</span>
+                <span
+                  className={`text-[10px] ${
+                    active ? 'text-white/90' : 'text-brand-brown/60'
+                  }`}
+                >
+                  {ch.is_auto_paid ? 'Otomatis Lunas' : 'Bayar di Kasir'}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Read-only authenticated waiter username + optional customer label */}
+      <div className="grid grid-cols-1 gap-3">
+        <div className="flex items-center justify-between rounded-xl border border-brand-amber-soft bg-brand-cream px-3.5 py-2.5">
+          <div className="flex items-center gap-2 text-xs text-brand-brown/70">
+            <UserCheck className="h-4 w-4 text-brand-orange" />
+            <span>Pelayan</span>
+          </div>
+          <span className="font-mono text-xs font-extrabold text-brand-brown">
+            @{currentUser.username}
+          </span>
+        </div>
+
         <div>
-          <label className="mb-1 block text-xs font-semibold text-slate-600">
-            No. Meja / Nama Konsumen (Opsional)
+          <label className="mb-1 block text-xs font-semibold text-brand-brown/80">
+            No. Meja / Nama Konsumen / ID Order (Opsional)
           </label>
           <input
             type="text"
             value={customerLabel}
             onChange={(e) => setCustomerLabel(e.target.value)}
-            placeholder="cth: Meja 4 / Pak Budi"
-            className="h-11 w-full rounded-xl border border-slate-200 px-3.5 text-base sm:text-sm focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/20"
-          />
-        </div>
-        <div>
-          <label className="mb-1 block text-xs font-semibold text-slate-600">
-            Nama Pelayan (Opsional)
-          </label>
-          <input
-            type="text"
-            value={waiterName}
-            onChange={(e) => setWaiterName(e.target.value)}
-            placeholder="cth: Sari"
-            className="h-11 w-full rounded-xl border border-slate-200 px-3.5 text-base sm:text-sm focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/20"
+            placeholder="cth: Meja 4 / Pak Budi / GF-102"
+            className="h-11 w-full rounded-xl border border-brand-amber-soft px-3.5 text-base text-brand-brown focus:border-brand-orange focus:outline-none focus:ring-2 focus:ring-brand-orange/20 sm:text-sm"
           />
         </div>
       </div>
 
+      {/* Cart Items */}
       <div className="space-y-2.5">
         {cartItems.length === 0 ? (
-          <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-slate-200 py-8 text-center text-slate-400">
+          <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-brand-amber-soft py-8 text-center text-brand-brown/50">
             <ShoppingBag className="mb-2 h-8 w-8" />
             <p className="text-sm font-medium">Belum ada menu dipilih</p>
             <p className="text-xs">Ketuk tombol + pada daftar menu</p>
           </div>
         ) : (
-          cartItems.map(({ menu, quantity, itemNote }) => (
-            <div
-              key={menu.id}
-              className="rounded-xl border border-slate-200/80 bg-slate-50 p-3"
-            >
-              <div className="flex items-start justify-between gap-2">
-                <div className="min-w-0">
-                  <p className="truncate text-sm font-bold text-slate-900">{menu.name}</p>
-                  <p className="text-xs text-slate-500">
-                    {formatRupiah(menu.price)} × {quantity} ={' '}
-                    <span className="font-bold text-emerald-700">
-                      {formatRupiah(menu.price * quantity)}
+          cartItems.map(({ menu, quantity, itemNote }) => {
+            const canAddMore = remainingForMenu(menu) > 0;
+            return (
+              <div
+                key={menu.id}
+                className="rounded-xl border border-brand-amber-soft/80 bg-brand-cream/60 p-3"
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-bold text-brand-brown">{menu.name}</p>
+                    <p className="text-xs text-brand-brown/70">
+                      {formatRupiah(menu.price)} × {quantity} ={' '}
+                      <span className="font-bold text-brand-orange">
+                        {formatRupiah(menu.price * quantity)}
+                      </span>
+                    </p>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => updateQuantity(menu, -1)}
+                      className="flex h-9 w-9 items-center justify-center rounded-lg border border-brand-amber-soft bg-white text-brand-brown active:scale-95"
+                      aria-label="Kurangi"
+                    >
+                      <Minus className="h-4 w-4" />
+                    </button>
+                    <span className="w-6 text-center text-sm font-bold text-brand-brown">
+                      {quantity}
                     </span>
-                  </p>
+                    <button
+                      type="button"
+                      disabled={!canAddMore}
+                      onClick={() => updateQuantity(menu, 1)}
+                      className="flex h-9 w-9 items-center justify-center rounded-lg bg-brand-orange text-white active:scale-95 disabled:bg-stone-300"
+                      aria-label="Tambah"
+                    >
+                      <Plus className="h-4 w-4" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => updateQuantity(menu, -quantity)}
+                      className="ml-0.5 flex h-9 w-9 items-center justify-center rounded-lg text-brand-brown/40 hover:bg-rose-50 hover:text-rose-600"
+                      aria-label="Hapus item"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </button>
+                  </div>
                 </div>
-                <div className="flex shrink-0 items-center gap-1.5">
-                  <button
-                    type="button"
-                    onClick={() => updateQuantity(menu, -1)}
-                    className="flex h-9 w-9 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-700 active:scale-95"
-                    aria-label="Kurangi"
-                  >
-                    <Minus className="h-4 w-4" />
-                  </button>
-                  <span className="w-6 text-center text-sm font-bold text-slate-900">
-                    {quantity}
-                  </span>
-                  <button
-                    type="button"
-                    disabled={quantity >= menu.current_stock}
-                    onClick={() => updateQuantity(menu, 1)}
-                    className="flex h-9 w-9 items-center justify-center rounded-lg bg-emerald-600 text-white active:scale-95 disabled:bg-slate-300"
-                    aria-label="Tambah"
-                  >
-                    <Plus className="h-4 w-4" />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => updateQuantity(menu, -quantity)}
-                    className="ml-0.5 flex h-9 w-9 items-center justify-center rounded-lg text-slate-400 hover:bg-red-50 hover:text-red-600"
-                    aria-label="Hapus item"
-                  >
-                    <Trash2 className="h-4 w-4" />
-                  </button>
-                </div>
+                <input
+                  type="text"
+                  value={itemNote}
+                  onChange={(e) => updateItemNote(menu.id, e.target.value)}
+                  placeholder="Catatan item (cth: sambal pisah, tanpa es)"
+                  className="mt-2.5 h-10 w-full rounded-lg border border-brand-amber-soft bg-white px-3 text-sm text-brand-brown focus:border-brand-orange focus:outline-none"
+                />
               </div>
-              <input
-                type="text"
-                value={itemNote}
-                onChange={(e) => updateItemNote(menu.id, e.target.value)}
-                placeholder="Catatan item (cth: sambal pisah, tanpa es)"
-                className="mt-2.5 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm focus:border-emerald-500 focus:outline-none"
-              />
-            </div>
-          ))
+            );
+          })
         )}
       </div>
 
       {cartItems.length > 0 && (
         <div>
-          <label className="mb-1 block text-xs font-semibold text-slate-600">
+          <label className="mb-1 block text-xs font-semibold text-brand-brown/80">
             Catatan Umum Nota (Opsional)
           </label>
           <input
@@ -263,7 +383,7 @@ export function WaiterOrderPage({ onPrintOrder, onOrderCreated }: WaiterOrderPag
             value={orderNotes}
             onChange={(e) => setOrderNotes(e.target.value)}
             placeholder="cth: Dibungkus / Makan di tempat"
-            className="h-11 w-full rounded-xl border border-slate-200 px-3.5 text-base sm:text-sm focus:border-emerald-500 focus:outline-none"
+            className="h-11 w-full rounded-xl border border-brand-amber-soft px-3.5 text-base text-brand-brown focus:border-brand-orange focus:outline-none sm:text-sm"
           />
         </div>
       )}
@@ -275,63 +395,44 @@ export function WaiterOrderPage({ onPrintOrder, onOrderCreated }: WaiterOrderPag
       {/* Header */}
       <div className="flex items-center justify-between gap-2">
         <div>
-          <h1 className="text-lg font-bold text-slate-900 sm:text-xl">
-            Catat Pesanan
-          </h1>
-          <p className="text-xs text-slate-500 sm:text-sm">
-            Ketuk menu untuk menambah ke nota. Stok otomatis terpotong.
+          <h1 className="text-lg font-extrabold text-brand-brown sm:text-xl">Catat Pesanan</h1>
+          <p className="text-xs text-brand-brown/70 sm:text-sm">
+            Pelayan <span className="font-mono font-bold">@{currentUser.username}</span> • Pilih channel &amp; menu.
           </p>
         </div>
         <button
           type="button"
-          onClick={() => void loadMenus()}
-          className="inline-flex h-10 items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 active:scale-95 hover:bg-slate-50 sm:text-sm"
+          onClick={() => void loadData()}
+          className="inline-flex h-10 items-center gap-1.5 rounded-xl border border-brand-amber-soft bg-white px-3 text-xs font-semibold text-brand-brown active:scale-95 hover:bg-brand-cream-deep sm:text-sm"
         >
           <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
           <span className="hidden sm:inline">Segarkan Stok</span>
         </button>
       </div>
 
-      {/* Success Banner after saving order */}
-      {lastOrder && (
-        <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-3.5 text-emerald-900 shadow-sm">
-          <div className="flex items-start justify-between gap-2">
-            <div className="flex items-start gap-2.5">
-              <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-emerald-600" />
-              <div>
-                <p className="text-sm font-bold">
-                  Nota {lastOrder.order_number} tersimpan!
-                </p>
-                <p className="text-xs text-emerald-800 sm:text-sm">
-                  {lastOrder.customer_label ? `${lastOrder.customer_label} • ` : ''}
-                  Total {formatRupiah(lastOrder.total_amount)} (Belum Bayar)
-                </p>
-              </div>
-            </div>
+      {/* Quick Mobile Channel Bar */}
+      <div className="no-scrollbar flex flex-nowrap items-center gap-2 overflow-x-auto pb-0.5 lg:hidden">
+        {channels.map((ch) => {
+          const active = selectedChannelId === ch.id;
+          return (
             <button
+              key={ch.id}
               type="button"
-              onClick={() => setLastOrder(null)}
-              className="rounded-lg p-1 text-emerald-700 hover:bg-emerald-100"
-              aria-label="Tutup"
+              onClick={() => setSelectedChannelId(ch.id)}
+              className={`h-9 shrink-0 rounded-full px-3.5 text-xs font-bold transition ${
+                active
+                  ? 'bg-brand-orange text-white shadow-sm'
+                  : 'bg-white text-brand-brown ring-1 ring-brand-amber-soft'
+              }`}
             >
-              <X className="h-4 w-4" />
+              {ch.name}
             </button>
-          </div>
-          <div className="mt-3 flex gap-2">
-            <button
-              type="button"
-              onClick={() => onPrintOrder(lastOrder)}
-              className="inline-flex h-10 flex-1 items-center justify-center gap-1.5 rounded-xl bg-emerald-600 px-3 text-sm font-bold text-white active:scale-98 hover:bg-emerald-700 sm:flex-none"
-            >
-              <Printer className="h-4 w-4" />
-              Cetak Nota
-            </button>
-          </div>
-        </div>
-      )}
+          );
+        })}
+      </div>
 
       {error && (
-        <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-700">
+        <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-medium text-rose-700">
           {error}
         </div>
       )}
@@ -339,22 +440,21 @@ export function WaiterOrderPage({ onPrintOrder, onOrderCreated }: WaiterOrderPag
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
         {/* Left: Search, Categories & Menu List */}
         <div className="space-y-3 lg:col-span-7 xl:col-span-8">
-          {/* Sticky search & horizontal category chips on mobile */}
-          <div className="sticky top-[57px] z-20 -mx-3 space-y-2.5 bg-slate-50/95 px-3 py-2 backdrop-blur md:static md:mx-0 md:bg-transparent md:p-0">
+          <div className="sticky top-[57px] z-20 -mx-3 space-y-2.5 bg-brand-cream/95 px-3 py-2 backdrop-blur md:static md:mx-0 md:bg-transparent md:p-0">
             <div className="relative">
-              <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+              <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-brand-brown/40" />
               <input
                 type="search"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 placeholder="Cari menu makanan atau minuman..."
-                className="h-11 w-full rounded-xl border border-slate-200 bg-white pl-10 pr-9 text-base sm:text-sm focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/20"
+                className="h-11 w-full rounded-xl border border-brand-amber-soft bg-white pl-10 pr-9 text-base text-brand-brown focus:border-brand-orange focus:outline-none focus:ring-2 focus:ring-brand-orange/20 sm:text-sm"
               />
               {search && (
                 <button
                   type="button"
                   onClick={() => setSearch('')}
-                  className="absolute right-2.5 top-1/2 -translate-y-1/2 rounded-full p-1 text-slate-400 hover:bg-slate-100"
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 rounded-full p-1 text-brand-brown/50 hover:bg-brand-cream"
                 >
                   <X className="h-4 w-4" />
                 </button>
@@ -369,8 +469,8 @@ export function WaiterOrderPage({ onPrintOrder, onOrderCreated }: WaiterOrderPag
                   onClick={() => setSelectedCategory(cat)}
                   className={`h-9 shrink-0 rounded-full px-4 text-xs font-bold transition active:scale-95 ${
                     selectedCategory === cat
-                      ? 'bg-slate-900 text-white shadow-sm'
-                      : 'bg-white text-slate-600 ring-1 ring-slate-200 hover:bg-slate-100'
+                      ? 'bg-brand-brown text-brand-cream shadow-sm'
+                      : 'bg-white text-brand-brown/80 ring-1 ring-brand-amber-soft hover:bg-brand-cream-deep'
                   }`}
                 >
                   {cat}
@@ -380,91 +480,95 @@ export function WaiterOrderPage({ onPrintOrder, onOrderCreated }: WaiterOrderPag
           </div>
 
           {loading ? (
-            <div className="rounded-2xl border border-slate-200 bg-white p-10 text-center text-sm text-slate-500">
+            <div className="rounded-2xl border border-brand-amber-soft bg-white p-10 text-center text-sm text-brand-brown/60">
               Memuat daftar menu...
             </div>
           ) : filteredMenus.length === 0 ? (
-            <div className="rounded-2xl border border-slate-200 bg-white p-10 text-center text-sm text-slate-500">
-              Tidak ada menu aktif yang cocok. Tambahkan menu di tab Menu &amp; Stok.
+            <div className="rounded-2xl border border-brand-amber-soft bg-white p-10 text-center text-sm text-brand-brown/60">
+              Tidak ada menu aktif yang cocok.
             </div>
           ) : (
             <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
               {filteredMenus.map((menu) => {
                 const qty = cart[menu.id]?.quantity ?? 0;
-                const isOut = menu.current_stock <= 0;
-                const isLow = menu.current_stock > 0 && menu.current_stock <= 5;
+                const rem = remainingForMenu(menu);
+                const isOut = menu.available_stock <= 0;
+                const isLow = menu.available_stock > 0 && menu.available_stock <= 5;
                 return (
                   <div
                     key={menu.id}
                     className={`flex items-center justify-between gap-3 rounded-2xl border p-3.5 transition sm:flex-col sm:items-stretch sm:justify-between sm:p-4 ${
                       qty > 0
-                        ? 'border-emerald-500 bg-emerald-50/50 shadow-sm'
+                        ? 'border-brand-orange bg-brand-cream-deep/60 shadow-sm'
                         : isOut
-                          ? 'border-slate-200 bg-slate-100/70 opacity-60'
-                          : 'border-slate-200 bg-white hover:border-slate-300'
+                          ? 'border-stone-200 bg-stone-100/80 opacity-60'
+                          : 'border-brand-amber-soft/80 bg-white hover:border-brand-amber'
                     }`}
                   >
-                    {/* Menu Info */}
                     <div className="min-w-0 flex-1">
                       <div className="flex flex-wrap items-center gap-1.5">
-                        <span className="rounded-md bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-slate-600">
+                        <span className="rounded-md bg-brand-cream-deep px-2 py-0.5 text-[11px] font-semibold text-brand-brown/80">
                           {menu.category}
                         </span>
                         <span
                           className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${
                             isOut
-                              ? 'bg-red-100 text-red-700'
+                              ? 'bg-rose-100 text-rose-700'
                               : isLow
                                 ? 'bg-amber-100 text-amber-800'
-                                : 'bg-emerald-100 text-emerald-800'
+                                : 'bg-emerald-100 text-emerald-700'
                           }`}
                         >
-                          {isOut ? 'Habis' : `Stok ${menu.current_stock}`}
+                          {isOut ? 'Habis' : `Tersedia ${menu.available_stock}`}
                         </span>
+                        {menu.stock_requirements.length > 1 && (
+                          <span className="rounded-full bg-brand-brown/10 px-2 py-0.5 text-[10px] font-bold text-brand-brown">
+                            Paket ({menu.stock_requirements.length} stok)
+                          </span>
+                        )}
                       </div>
-                      <h3 className="mt-1 truncate text-base font-bold text-slate-900">
+                      <h3 className="mt-1.5 truncate text-sm font-bold text-brand-brown sm:text-base">
                         {menu.name}
                       </h3>
-                      <p className="text-sm font-extrabold text-emerald-700">
+                      <p className="mt-0.5 text-sm font-extrabold text-brand-orange">
                         {formatRupiah(menu.price)}
                       </p>
                     </div>
 
-                    {/* Thumb-friendly Stepper / Add Button */}
-                    <div className="shrink-0 sm:mt-3 sm:w-full">
-                      {qty === 0 ? (
-                        <button
-                          type="button"
-                          disabled={isOut}
-                          onClick={() => updateQuantity(menu, 1)}
-                          className="flex h-11 items-center justify-center gap-1.5 rounded-xl bg-slate-900 px-4 text-sm font-bold text-white transition active:scale-95 hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-300 sm:w-full"
-                        >
-                          <Plus className="h-4 w-4" />
-                          <span>Tambah</span>
-                        </button>
-                      ) : (
-                        <div className="flex h-11 items-center justify-between gap-1 rounded-xl bg-white p-1 ring-2 ring-emerald-500 sm:w-full">
+                    <div className="flex shrink-0 items-center justify-end gap-1.5 sm:mt-3">
+                      {qty > 0 ? (
+                        <div className="flex items-center gap-2 rounded-xl border border-brand-orange/40 bg-white p-1">
                           <button
                             type="button"
                             onClick={() => updateQuantity(menu, -1)}
-                            className="flex h-9 w-9 items-center justify-center rounded-lg bg-slate-100 text-slate-800 active:scale-95 hover:bg-slate-200"
-                            aria-label="Kurangi jumlah"
+                            className="flex h-9 w-9 items-center justify-center rounded-lg bg-brand-cream text-brand-brown active:scale-95"
+                            aria-label="Kurangi"
                           >
                             <Minus className="h-4 w-4" />
                           </button>
-                          <span className="min-w-[28px] text-center text-base font-extrabold text-slate-900">
+                          <span className="min-w-[24px] text-center text-sm font-extrabold text-brand-brown">
                             {qty}
                           </span>
                           <button
                             type="button"
-                            disabled={qty >= menu.current_stock}
+                            disabled={rem <= 0}
                             onClick={() => updateQuantity(menu, 1)}
-                            className="flex h-9 w-9 items-center justify-center rounded-lg bg-emerald-600 text-white active:scale-95 hover:bg-emerald-700 disabled:cursor-not-allowed disabled:bg-slate-300"
-                            aria-label="Tambah jumlah"
+                            className="flex h-9 w-9 items-center justify-center rounded-lg bg-brand-orange text-white active:scale-95 disabled:bg-stone-300"
+                            aria-label="Tambah"
                           >
                             <Plus className="h-4 w-4" />
                           </button>
                         </div>
+                      ) : (
+                        <button
+                          type="button"
+                          disabled={isOut || rem <= 0}
+                          onClick={() => updateQuantity(menu, 1)}
+                          className="inline-flex h-10 items-center justify-center gap-1 rounded-xl bg-brand-orange px-3.5 text-xs font-bold text-white shadow-sm active:scale-95 hover:bg-brand-orange-dark disabled:bg-stone-300 sm:w-full sm:text-sm"
+                        >
+                          <Plus className="h-4 w-4" />
+                          <span>Tambah</span>
+                        </button>
                       )}
                     </div>
                   </div>
@@ -474,91 +578,103 @@ export function WaiterOrderPage({ onPrintOrder, onOrderCreated }: WaiterOrderPag
           )}
         </div>
 
-        {/* Desktop Right Sticky Cart Panel */}
-        <div className="hidden lg:col-span-5 lg:block xl:col-span-4">
+        {/* Desktop Right Cart Panel */}
+        <aside className="hidden lg:col-span-5 lg:block xl:col-span-4">
           <form
             onSubmit={handleSubmitOrder}
-            className="sticky top-20 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"
+            className="sticky top-20 rounded-2xl border border-brand-amber-soft bg-white p-5 shadow-sm"
           >
-            <div className="mb-4 flex items-center justify-between border-b border-slate-100 pb-3">
+            <div className="mb-4 flex items-center justify-between border-b border-brand-amber-soft/60 pb-3">
               <div className="flex items-center gap-2">
-                <ClipboardList className="h-5 w-5 text-emerald-600" />
-                <h2 className="text-base font-bold text-slate-900">Ringkasan Nota</h2>
+                <ClipboardList className="h-5 w-5 text-brand-orange" />
+                <h2 className="text-base font-extrabold text-brand-brown">Ringkasan Nota</h2>
               </div>
-              <span className="rounded-full bg-emerald-100 px-2.5 py-0.5 text-xs font-bold text-emerald-800">
-                {totalQty} porsi
-              </span>
+              {totalQty > 0 && (
+                <span className="rounded-full bg-brand-cream-deep px-2.5 py-0.5 text-xs font-bold text-brand-brown">
+                  {totalQty} porsi
+                </span>
+              )}
             </div>
 
-            <div className="max-h-[55vh] overflow-y-auto pr-1">{renderCartFields()}</div>
+            {renderCartFields()}
 
-            <div className="mt-4 border-t border-slate-200 pt-4">
-              <div className="flex items-center justify-between text-base font-bold text-slate-900">
-                <span>Total Nota</span>
-                <span className="text-lg text-emerald-700">{formatRupiah(totalAmount)}</span>
+            <div className="mt-5 border-t border-brand-amber-soft/60 pt-4">
+              <div className="mb-3 flex items-center justify-between">
+                <span className="text-sm font-semibold text-brand-brown/75">
+                  Total ({selectedChannel?.name ?? 'Regular'})
+                </span>
+                <span className="text-xl font-extrabold text-brand-brown">
+                  {formatRupiah(totalAmount)}
+                </span>
               </div>
               <button
                 type="submit"
-                disabled={cartItems.length === 0 || submitting}
-                className="mt-3 flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 text-sm font-bold text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:bg-slate-300"
+                disabled={submitting || cartItems.length === 0 || !selectedChannelId}
+                className="flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-brand-orange text-sm font-bold text-white shadow-sm transition hover:bg-brand-orange-dark disabled:cursor-not-allowed disabled:bg-stone-300"
               >
-                {submitting ? 'Menyimpan Nota...' : 'Simpan Nota & Potong Stok'}
+                {submitting
+                  ? 'Menyimpan...'
+                  : selectedChannel?.is_auto_paid
+                    ? `Simpan Nota (${selectedChannel.name} • Lunas)`
+                    : 'Simpan Nota'}
               </button>
             </div>
           </form>
-        </div>
+        </aside>
       </div>
 
-      {/* Mobile Floating Sticky Cart Bar (above Android Bottom Nav) */}
+      {/* Mobile Floating Cart Bar */}
       {totalQty > 0 && (
         <div className="fixed inset-x-3 bottom-[72px] z-30 md:bottom-4 lg:hidden">
           <button
             type="button"
             onClick={() => setCartSheetOpen(true)}
-            className="flex h-14 w-full items-center justify-between rounded-2xl bg-emerald-600 px-4 text-white shadow-lg shadow-emerald-900/25 transition active:scale-[0.99] hover:bg-emerald-700"
+            className="flex h-14 w-full items-center justify-between rounded-2xl bg-brand-brown px-4 text-brand-cream shadow-xl active:scale-[0.99]"
           >
-            <div className="flex items-center gap-3">
-              <span className="flex h-8 min-w-[32px] items-center justify-center rounded-xl bg-white/20 px-2 text-sm font-extrabold">
+            <div className="flex items-center gap-2.5">
+              <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-brand-orange text-sm font-extrabold text-white">
                 {totalQty}
               </span>
               <div className="text-left">
-                <p className="text-[11px] font-medium text-emerald-100">
-                  Ringkasan Nota
+                <p className="text-[11px] font-medium text-brand-amber-soft">
+                  {selectedChannel?.name ?? 'Regular'}
                 </p>
-                <p className="text-base font-extrabold leading-tight">
-                  {formatRupiah(totalAmount)}
-                </p>
+                <p className="text-sm font-extrabold">{formatRupiah(totalAmount)}</p>
               </div>
             </div>
-            <span className="inline-flex items-center gap-1 rounded-xl bg-white/15 px-3 py-1.5 text-xs font-bold">
-              Tinjau &amp; Simpan
+            <div className="flex items-center gap-1 text-sm font-bold text-brand-amber">
+              <span>Lihat Nota</span>
               <ChevronRight className="h-4 w-4" />
-            </span>
+            </div>
           </button>
         </div>
       )}
 
-      {/* Mobile Checkout Bottom Sheet */}
+      {/* Mobile Cart BottomSheet */}
       <BottomSheet
         open={cartSheetOpen}
         title="Ringkasan Nota"
-        subtitle={`${totalQty} porsi dipilih • Total ${formatRupiah(totalAmount)}`}
+        subtitle={`${totalQty} porsi • ${selectedChannel?.name ?? 'Regular'}`}
         onClose={() => setCartSheetOpen(false)}
         footer={
           <div className="space-y-2.5">
             <div className="flex items-center justify-between">
-              <span className="text-sm font-semibold text-slate-600">Total Tagihan</span>
-              <span className="text-xl font-extrabold text-emerald-700">
+              <span className="text-sm font-semibold text-brand-brown/75">Total</span>
+              <span className="text-lg font-extrabold text-brand-brown">
                 {formatRupiah(totalAmount)}
               </span>
             </div>
             <button
               type="button"
-              disabled={cartItems.length === 0 || submitting}
+              disabled={submitting || cartItems.length === 0 || !selectedChannelId}
               onClick={() => void handleSubmitOrder()}
-              className="flex h-12 w-full items-center justify-center rounded-xl bg-emerald-600 text-sm font-bold text-white shadow-sm active:scale-[0.99] hover:bg-emerald-700 disabled:bg-slate-300"
+              className="flex h-12 w-full items-center justify-center rounded-xl bg-brand-orange text-sm font-bold text-white shadow-sm hover:bg-brand-orange-dark disabled:bg-stone-300"
             >
-              {submitting ? 'Menyimpan Nota...' : 'Simpan Nota & Potong Stok'}
+              {submitting
+                ? 'Menyimpan...'
+                : selectedChannel?.is_auto_paid
+                  ? `Simpan (${selectedChannel.name} • Lunas)`
+                  : 'Simpan Nota Sekarang'}
             </button>
           </div>
         }
