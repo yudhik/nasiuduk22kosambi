@@ -111,6 +111,14 @@ export interface DailyExpense {
   created_at: string;
 }
 
+export interface ExpenseCategory {
+  id: number;
+  name: string;
+  is_active: number;
+  sort_order: number;
+  created_at: string;
+}
+
 export interface OrderItemDetail {
   id: number;
   order_id: number;

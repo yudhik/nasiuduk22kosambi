@@ -177,7 +177,19 @@ pub fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
             "/expenses",
             get(handlers::expenses::list_expenses).post(handlers::expenses::create_expense),
         )
-        .route("/expenses/:id", delete(handlers::expenses::delete_expense))
+        .route(
+            "/expenses/:id",
+            put(handlers::expenses::update_expense).delete(handlers::expenses::delete_expense),
+        )
+        .route(
+            "/expense-categories",
+            get(handlers::expenses::list_expense_categories)
+                .post(handlers::expenses::create_expense_category),
+        )
+        .route(
+            "/expense-categories/:id",
+            put(handlers::expenses::update_expense_category),
+        )
         // Orders (Nota Digital)
         .route(
             "/orders",

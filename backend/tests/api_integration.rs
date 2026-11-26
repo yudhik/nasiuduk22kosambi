@@ -1073,3 +1073,276 @@ async fn test_self_stock_menu_and_delete_archive_rules() {
     assert_eq!(del_s2["soft_deleted"], true);
     assert!(del_s2["reason"].as_str().is_some());
 }
+
+#[tokio::test]
+async fn test_expense_categories_and_editable_expenses() {
+    let cfg = test_auth_config(5, 15);
+    let (app, _pool) = setup_app_with_config(cfg.clone()).await;
+    let (status, _, admin_cookie) =
+        login_request(&app, &cfg.admin_username, &cfg.admin_password).await;
+    assert_eq!(status, StatusCode::OK);
+    let admin_cookie = admin_cookie.unwrap();
+
+    // 1. Seeded defaults are present
+    let (status, cats_val, _) = send_json_with_cookie(
+        &app,
+        Method::GET,
+        "/api/expense-categories",
+        Some(&admin_cookie),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(cats_val.as_array().unwrap().len() >= 5);
+
+    // 2. Create category; duplicate (case-insensitive) is rejected; blank is rejected
+    let (status, cat_val, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/expense-categories",
+        Some(&admin_cookie),
+        Some(json!({ "name": "Transport" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let cat_id = cat_val["id"].as_i64().unwrap();
+    for (body, expected) in [
+        (json!({ "name": "transport" }), StatusCode::CONFLICT),
+        (json!({ "name": "   " }), StatusCode::BAD_REQUEST),
+    ] {
+        let (status, _, _) = send_json_with_cookie(
+            &app,
+            Method::POST,
+            "/api/expense-categories",
+            Some(&admin_cookie),
+            Some(body),
+        )
+        .await;
+        assert_eq!(status, expected);
+    }
+
+    // 3. Expenses must use a known active category
+    let (status, exp_val, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/expenses",
+        Some(&admin_cookie),
+        Some(json!({ "title": "Ojek beli ayam", "category": "Transport", "amount": 10000 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let expense: DailyExpense = serde_json::from_value(exp_val).unwrap();
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/expenses",
+        Some(&admin_cookie),
+        Some(json!({ "title": "Ngawur", "category": "Tidak Ada", "amount": 5000 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // 4. Renaming a category relabels recorded expenses
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::PUT,
+        &format!("/api/expense-categories/{cat_id}"),
+        Some(&admin_cookie),
+        Some(json!({ "name": "Ongkir", "is_active": true })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, list_val, _) =
+        send_json_with_cookie(&app, Method::GET, "/api/expenses", Some(&admin_cookie), None).await;
+    let listed: Vec<DailyExpense> = serde_json::from_value(list_val).unwrap();
+    assert_eq!(
+        listed.iter().find(|e| e.id == expense.id).unwrap().category,
+        "Ongkir"
+    );
+    // Renaming onto another category's name conflicts; a case-only rename of itself is fine
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::PUT,
+        &format!("/api/expense-categories/{cat_id}"),
+        Some(&admin_cookie),
+        Some(json!({ "name": "kemasan", "is_active": true })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::PUT,
+        "/api/expense-categories/999999",
+        Some(&admin_cookie),
+        Some(json!({ "name": "X", "is_active": true })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // 4b. Deactivated category: an expense keeps its own retired label on edit, others cannot adopt it
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::PUT,
+        &format!("/api/expense-categories/{cat_id}"),
+        Some(&admin_cookie),
+        Some(json!({ "name": "Ongkir", "is_active": false })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let edit_uri = format!("/api/expenses/{}", expense.id);
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::PUT,
+        &edit_uri,
+        Some(&admin_cookie),
+        Some(json!({ "title": "Ojek (koreksi)", "category": "Ongkir", "amount": 11000 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/expenses",
+        Some(&admin_cookie),
+        Some(json!({ "title": "Ojek lagi", "category": "Ongkir", "amount": 7000 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    // Missing category falls back to "Operasional"
+    let (status, def_val, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/expenses",
+        Some(&admin_cookie),
+        Some(json!({ "title": "Tanpa kategori", "amount": 3000 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(def_val["category"], "Operasional");
+
+    // 5. Edit an expense (title/category/amount/notes); invalid input is rejected
+
+    let (status, upd_val, _) = send_json_with_cookie(
+        &app,
+        Method::PUT,
+        &edit_uri,
+        Some(&admin_cookie),
+        Some(json!({
+            "title": "Beli kantong plastik",
+            "category": "Kemasan",
+            "amount": 15000,
+            "notes": "koreksi"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let updated: DailyExpense = serde_json::from_value(upd_val).unwrap();
+    assert_eq!(updated.title, "Beli kantong plastik");
+    assert_eq!(updated.category, "Kemasan");
+    assert_eq!(updated.amount, 15000);
+    assert_eq!(updated.notes, "koreksi");
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::PUT,
+        &edit_uri,
+        Some(&admin_cookie),
+        Some(json!({ "title": "x", "category": "Kemasan", "amount": 0 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::PUT,
+        "/api/expenses/999999",
+        Some(&admin_cookie),
+        Some(json!({ "title": "x", "category": "Kemasan", "amount": 100 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // 6. Deactivated categories cannot be newly used, but an expense keeps its own retired label
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::PUT,
+        &format!("/api/expense-categories/{cat_id}"),
+        Some(&admin_cookie),
+        Some(json!({ "name": "Ongkir", "is_active": false })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/expenses",
+        Some(&admin_cookie),
+        Some(json!({ "title": "Ojek lagi", "category": "Ongkir", "amount": 7000 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // 7. Cashiers cannot manage categories or edit expenses
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/admin/users",
+        Some(&admin_cookie),
+        Some(json!({
+            "username": "kasir1",
+            "full_name": "Kasir Satu",
+            "password": "password123",
+            "role": "cashier"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, _, cashier_cookie) = login_request(&app, "kasir1", "password123").await;
+    assert_eq!(status, StatusCode::OK);
+    let cashier_cookie = cashier_cookie.unwrap();
+    for (method, uri, body) in [
+        (Method::GET, "/api/expense-categories".to_string(), None),
+        (
+            Method::POST,
+            "/api/expense-categories".to_string(),
+            Some(json!({ "name": "Hack" })),
+        ),
+        (
+            Method::PUT,
+            edit_uri.clone(),
+            Some(json!({ "title": "x", "category": "Kemasan", "amount": 100 })),
+        ),
+    ] {
+        let (status, _, _) =
+            send_json_with_cookie(&app, method, &uri, Some(&cashier_cookie), body).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    // 8. Closed days are locked for edits
+    let stock = create_stock(&app, &admin_cookie, "Nasi Uduk", "porsi").await;
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/store/open",
+        Some(&admin_cookie),
+        Some(json!({ "stocks": [{ "stock_item_id": stock.id, "initial_stock": 10 }] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/store/close",
+        Some(&admin_cookie),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::PUT,
+        &edit_uri,
+        Some(&admin_cookie),
+        Some(json!({ "title": "x", "category": "Kemasan", "amount": 100 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+}

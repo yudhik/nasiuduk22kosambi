@@ -222,6 +222,34 @@ pub struct CreateExpenseRequest {
     pub notes: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct UpdateExpenseRequest {
+    pub title: String,
+    pub category: String,
+    pub amount: i64,
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct ExpenseCategory {
+    pub id: i64,
+    pub name: String,
+    pub is_active: i64,
+    pub sort_order: i64,
+    pub created_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateExpenseCategoryRequest {
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateExpenseCategoryRequest {
+    pub name: String,
+    pub is_active: bool,
+}
+
 // ===== Orders (Nota Digital) =====
 
 #[derive(Debug, Deserialize)]

@@ -8,6 +8,7 @@ import type {
   CreateUserPayload,
   DailyExpense,
   DailyReportResponse,
+  ExpenseCategory,
   ImportMenuCsvResponse,
   MenuItem,
   OrderDetail,
@@ -260,6 +261,31 @@ export const api = {
   deleteExpense: (id: number) =>
     request<{ deleted: boolean }>(`/api/expenses/${id}`, {
       method: 'DELETE',
+    }),
+
+  updateExpense: (
+    id: number,
+    payload: { title: string; category: string; amount: number; notes?: string }
+  ) =>
+    request<DailyExpense>(`/api/expenses/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }),
+
+  // Expense Categories
+  listExpenseCategories: (activeOnly = false) =>
+    request<ExpenseCategory[]>(`/api/expense-categories?active_only=${activeOnly}`),
+
+  createExpenseCategory: (name: string) =>
+    request<ExpenseCategory>('/api/expense-categories', {
+      method: 'POST',
+      body: JSON.stringify({ name }),
+    }),
+
+  updateExpenseCategory: (id: number, payload: { name: string; is_active: boolean }) =>
+    request<ExpenseCategory>(`/api/expense-categories/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
     }),
 
   // Orders (Nota Digital)
