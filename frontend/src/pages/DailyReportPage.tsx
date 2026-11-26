@@ -21,7 +21,7 @@ import type {
   StockMovement,
   StoreStatusResponse,
 } from '../types';
-import { formatRupiah, formatTime, todayLocalDate } from '../utils/format';
+import { formatRupiah, formatTime, formatTimestamp, todayLocalDate } from '../utils/format';
 
 interface DailyReportPageProps {
   storeStatus: StoreStatusResponse | null;
@@ -1092,7 +1092,7 @@ export function DailyReportPage({ storeStatus, onToast }: DailyReportPageProps) 
                           </span>
                         </div>
                         <p className="mt-0.5 text-[11px] text-brand-brown/65">
-                          {formatTime(order.created_at)} • @{order.waiter_name}
+                          <span className="font-mono">{formatTimestamp(order.created_at)}</span> • @{order.waiter_name}
                           {order.customer_label ? ` • ${order.customer_label}` : ''}
                         </p>
                       </div>
@@ -1148,7 +1148,7 @@ export function DailyReportPage({ storeStatus, onToast }: DailyReportPageProps) 
                     </div>
                     {ex.notes && <p className="mt-0.5 text-[11px] text-brand-brown/65">{ex.notes}</p>}
                     <p className="mt-0.5 text-[10px] text-brand-brown/55">
-                      {formatTime(ex.created_at)} • @{ex.created_by_username}
+                      <span className="font-mono">{formatTimestamp(ex.created_at)}</span> • @{ex.created_by_username}
                     </p>
                   </div>
                   <span className="shrink-0 font-extrabold text-rose-700">
@@ -1200,7 +1200,7 @@ export function DailyReportPage({ storeStatus, onToast }: DailyReportPageProps) 
                       <div>
                         <span className="font-mono font-bold text-brand-brown">{o.order_number}</span>
                         <span className="ml-1.5 text-[11px] text-brand-brown/65">
-                          {o.channel_name} • {formatTime(o.created_at)}
+                          {o.channel_name} • <span className="font-mono">{formatTimestamp(o.created_at)}</span>
                         </span>
                       </div>
                       <span className="font-extrabold text-emerald-700">
@@ -1225,7 +1225,7 @@ export function DailyReportPage({ storeStatus, onToast }: DailyReportPageProps) 
                       <div>
                         <span className="font-bold text-brand-brown">{ex.title}</span>
                         <span className="ml-1.5 text-[11px] text-brand-brown/65">
-                          {ex.category} • {formatTime(ex.created_at)}
+                          {ex.category} • <span className="font-mono">{formatTimestamp(ex.created_at)}</span>
                         </span>
                       </div>
                       <span className="font-extrabold text-rose-700">
@@ -1273,7 +1273,7 @@ export function DailyReportPage({ storeStatus, onToast }: DailyReportPageProps) 
                         </span>
                       </div>
                       <p className="mt-0.5 text-[11px] text-brand-brown/65">
-                        {formatTime(order.created_at)} • @{order.waiter_name}
+                        <span className="font-mono">{formatTimestamp(order.created_at)}</span> • @{order.waiter_name}
                         {order.customer_label ? ` • ${order.customer_label}` : ''}
                       </p>
                     </div>
