@@ -32,18 +32,38 @@ async fn build_store_status(
             .fetch_optional(pool)
             .await?;
 
-    // Only Cashier, Owner, and Admin need unpaid order count; Waiter never sees Cashier counts
-    let unpaid_count = if matches!(role, Role::Cashier | Role::Owner | Role::Admin) {
-        let (cnt,): (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM orders WHERE business_date = ? AND status = 'UNPAID'",
-        )
-        .bind(business_date)
-        .fetch_one(pool)
-        .await?;
-        cnt
-    } else {
-        0
-    };
+    // Only Cashier, Owner, and Admin need unpaid order counts; Waiter never sees Cashier counts
+    let (unpaid_count, pending_prior_date, pending_prior_unpaid_count) =
+        if matches!(role, Role::Cashier | Role::Owner | Role::Admin) {
+            let (cnt,): (i64,) = sqlx::query_as(
+                "SELECT COUNT(*) FROM orders WHERE business_date = ? AND status = 'UNPAID'",
+            )
+            .bind(business_date)
+            .fetch_one(pool)
+            .await?;
+
+            let prior: Option<(String, i64)> = sqlx::query_as(
+                r#"
+                SELECT o.business_date, COUNT(*)
+                FROM orders o
+                INNER JOIN store_days sd ON sd.business_date = o.business_date
+                WHERE sd.status = 'OPEN' AND o.business_date < ? AND o.status = 'UNPAID'
+                GROUP BY o.business_date
+                ORDER BY o.business_date ASC
+                LIMIT 1
+                "#,
+            )
+            .bind(business_date)
+            .fetch_optional(pool)
+            .await?;
+
+            match prior {
+                Some((d, c)) => (cnt, Some(d), c),
+                None => (cnt, None, 0),
+            }
+        } else {
+            (0, None, 0)
+        };
 
     // Financial closing_summary (revenue/expenses/net_profit) strictly restricted to Owner & Admin
     let allow_financials = matches!(role, Role::Owner | Role::Admin);
@@ -63,6 +83,8 @@ async fn build_store_status(
                 closed_at: row.closed_at,
                 closed_by_username: row.closed_by_username,
                 unpaid_order_count: unpaid_count,
+                pending_prior_date,
+                pending_prior_unpaid_count,
                 closing_summary,
             })
         }
@@ -74,6 +96,8 @@ async fn build_store_status(
             closed_at: None,
             closed_by_username: None,
             unpaid_order_count: unpaid_count,
+            pending_prior_date,
+            pending_prior_unpaid_count,
             closing_summary: None,
         }),
     }

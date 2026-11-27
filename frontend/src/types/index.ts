@@ -96,6 +96,8 @@ export interface StoreStatusResponse {
   closed_at: string | null;
   closed_by_username: string | null;
   unpaid_order_count: number;
+  pending_prior_date: string | null;
+  pending_prior_unpaid_count: number;
   closing_summary: StoreDaySummary | null;
 }
 

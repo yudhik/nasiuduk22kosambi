@@ -347,8 +347,11 @@ export function CashierOrdersPage({
     );
   };
 
-  // Block cashier when today has not been opened yet (only on today's date)
+  // Block cashier when today has not been opened yet (only on today's date),
+  // while still letting cashiers switch to a prior date to settle leftover UNPAID orders.
   if (date === todayLocalDate() && storeStatus?.status === 'NOT_OPENED') {
+    const priorDate = storeStatus.pending_prior_date;
+    const priorCount = storeStatus.pending_prior_unpaid_count ?? 0;
     return (
       <div className="mx-auto max-w-lg rounded-3xl border border-brand-amber-soft bg-white p-8 text-center shadow-sm">
         <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-brand-cream-deep text-brand-orange">
@@ -358,14 +361,50 @@ export function CashierOrdersPage({
         <p className="mt-2 text-sm text-brand-brown/70">
           Pemilik atau Administrator perlu mengisi stok awal harian dan menekan &ldquo;Buka Toko&rdquo; terlebih dahulu.
         </p>
-        <button
-          type="button"
-          onClick={() => void onRefreshStoreStatus()}
-          className="mt-5 inline-flex h-11 items-center gap-2 rounded-xl bg-brand-orange px-5 text-sm font-bold text-white shadow-sm hover:bg-brand-orange-dark"
-        >
-          <RefreshCw className="h-4 w-4" />
-          <span>Periksa Status Toko</span>
-        </button>
+
+        {priorDate && priorCount > 0 && (
+          <div className="mt-5 rounded-2xl border border-amber-300 bg-amber-50 p-4 text-left">
+            <p className="text-xs font-extrabold text-amber-900">
+              Ada {priorCount} nota BELUM BAYAR dari tanggal {priorDate}
+            </p>
+            <p className="mt-1 text-xs text-amber-800">
+              Selesaikan (lunasi atau batalkan) nota tersebut terlebih dahulu agar toko hari ini dapat dibuka.
+            </p>
+            <button
+              type="button"
+              onClick={() => {
+                setDate(priorDate);
+                setStatusFilter('UNPAID');
+              }}
+              className="mt-3 inline-flex h-10 w-full items-center justify-center gap-2 rounded-xl bg-amber-600 px-4 text-xs font-extrabold text-white shadow-sm hover:bg-amber-700"
+            >
+              <Clock className="h-4 w-4" />
+              <span>
+                Buka {priorCount} Nota Belum Bayar ({priorDate})
+              </span>
+            </button>
+          </div>
+        )}
+
+        <div className="mt-5 flex flex-wrap items-center justify-center gap-2">
+          <button
+            type="button"
+            onClick={() => void onRefreshStoreStatus()}
+            className="inline-flex h-11 items-center gap-2 rounded-xl bg-brand-orange px-5 text-sm font-bold text-white shadow-sm hover:bg-brand-orange-dark"
+          >
+            <RefreshCw className="h-4 w-4" />
+            <span>Periksa Status Toko</span>
+          </button>
+          <input
+            type="date"
+            aria-label="Lihat nota tanggal lain"
+            value={date}
+            onChange={(e) => {
+              if (e.target.value) setDate(e.target.value);
+            }}
+            className="h-11 rounded-xl border border-brand-amber-soft bg-brand-cream/40 px-3 text-xs font-bold text-brand-brown focus:border-brand-orange focus:outline-none"
+          />
+        </div>
       </div>
     );
   }

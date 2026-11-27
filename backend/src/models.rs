@@ -171,6 +171,8 @@ pub struct StoreStatusResponse {
     pub closed_at: Option<String>,
     pub closed_by_username: Option<String>,
     pub unpaid_order_count: i64,
+    pub pending_prior_date: Option<String>,
+    pub pending_prior_unpaid_count: i64,
     pub closing_summary: Option<StoreDayRow>,
 }
 
