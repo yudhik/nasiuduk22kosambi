@@ -158,6 +158,9 @@ export const api = {
     footer_text: string;
     header_bold: boolean;
     header_font_size: ReceiptSettings['header_font_size'];
+    review_enabled: boolean;
+    review_text: string;
+    review_url: string;
   }) =>
     request<ReceiptSettings>('/api/admin/receipt-settings', {
       method: 'PUT',

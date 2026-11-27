@@ -86,6 +86,15 @@ export function AdminUsersPage({
   const [receiptHeaderFontSize, setReceiptHeaderFontSize] = useState<ReceiptHeaderFontSize>(
     receiptSettings?.header_font_size ?? 'tall'
   );
+  const [receiptReviewEnabled, setReceiptReviewEnabled] = useState(
+    receiptSettings?.review_enabled ?? false
+  );
+  const [receiptReviewText, setReceiptReviewText] = useState(
+    receiptSettings?.review_text ?? ''
+  );
+  const [receiptReviewUrl, setReceiptReviewUrl] = useState(
+    receiptSettings?.review_url ?? ''
+  );
   const [receiptUpdatedMeta, setReceiptUpdatedMeta] = useState<{
     at: string;
     by: string;
@@ -137,6 +146,9 @@ export function AdminUsersPage({
       setReceiptFooter(rCfg.footer_text);
       setReceiptHeaderBold(rCfg.header_bold);
       setReceiptHeaderFontSize(rCfg.header_font_size);
+      setReceiptReviewEnabled(rCfg.review_enabled);
+      setReceiptReviewText(rCfg.review_text);
+      setReceiptReviewUrl(rCfg.review_url);
       setReceiptUpdatedMeta(
         rCfg.updated_at ? { at: rCfg.updated_at, by: rCfg.updated_by_username } : null
       );
@@ -166,6 +178,10 @@ export function AdminUsersPage({
       setError('Header nota wajib diisi.');
       return;
     }
+    if (receiptReviewEnabled && !receiptReviewUrl.trim()) {
+      setError('Link URL ulasan wajib diisi saat Bagian Ulasan diaktifkan.');
+      return;
+    }
     try {
       setSavingReceipt(true);
       setError(null);
@@ -175,14 +191,20 @@ export function AdminUsersPage({
         footer_text: receiptFooter,
         header_bold: receiptHeaderBold,
         header_font_size: receiptHeaderFontSize,
+        review_enabled: receiptReviewEnabled,
+        review_text: receiptReviewText,
+        review_url: receiptReviewUrl,
       });
       setReceiptHeader(updated.header_text);
       setReceiptFooter(updated.footer_text);
       setReceiptHeaderBold(updated.header_bold);
       setReceiptHeaderFontSize(updated.header_font_size);
+      setReceiptReviewEnabled(updated.review_enabled);
+      setReceiptReviewText(updated.review_text);
+      setReceiptReviewUrl(updated.review_url);
       setReceiptUpdatedMeta({ at: updated.updated_at, by: updated.updated_by_username });
       onReceiptSettingsUpdated(updated);
-      setNotice('Pengaturan header & footer nota berhasil disimpan dan langsung aktif.');
+      setNotice('Pengaturan struk nota berhasil disimpan dan langsung aktif.');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Gagal menyimpan pengaturan nota');
     } finally {
@@ -761,6 +783,76 @@ export function AdminUsersPage({
               </p>
             </div>
 
+            {/* Review QR Section */}
+            <div className="space-y-3 rounded-xl border border-brand-amber-soft/90 bg-brand-cream/40 p-3.5">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h4 className="text-xs font-extrabold text-brand-brown">
+                    Bagian Ulasan Pelanggan (QR Review di Bawah Footer)
+                  </h4>
+                  <p className="mt-0.5 text-[11px] text-brand-brown/70">
+                    Cetak QR link ulasan (Google Maps / IG / WhatsApp) khusus pada struk LUNAS.
+                  </p>
+                </div>
+                <label className="inline-flex shrink-0 cursor-pointer items-center gap-2 rounded-xl border border-brand-amber-soft bg-white px-3 py-1.5 text-xs font-bold text-brand-brown">
+                  <input
+                    type="checkbox"
+                    checked={receiptReviewEnabled}
+                    onChange={(e) => setReceiptReviewEnabled(e.target.checked)}
+                    className="h-4 w-4 accent-brand-orange"
+                  />
+                  <span>{receiptReviewEnabled ? 'Aktif' : 'Nonaktif'}</span>
+                </label>
+              </div>
+
+              {receiptReviewEnabled && (
+                <div className="rounded-xl border border-amber-300 bg-amber-50 px-3 py-2 text-[11px] font-medium text-amber-900">
+                  Saat Bagian Ulasan aktif, <strong>pemberian voucher (otomatis &amp; manual) dijeda sementara</strong> agar struk 58mm tidak mencetak 2 QR. Pelanggan yang sudah memiliki voucher tetap dapat menukarnya saat bayar.
+                </div>
+              )}
+
+              <div>
+                <div className="mb-1 flex items-center justify-between">
+                  <label className="text-xs font-bold text-brand-brown">
+                    Teks Ajakan Ulasan (Opsional)
+                  </label>
+                  <span className="text-[11px] tabular-nums text-brand-brown/55">
+                    {receiptReviewText.length}/160
+                  </span>
+                </div>
+                <textarea
+                  rows={2}
+                  maxLength={160}
+                  value={receiptReviewText}
+                  onChange={(e) => setReceiptReviewText(e.target.value)}
+                  placeholder="Suka makanan kami? Scan untuk beri ulasan di Google!"
+                  className="w-full rounded-xl border border-brand-amber-soft bg-white px-3 py-2 text-sm text-brand-brown focus:border-brand-orange focus:outline-none"
+                />
+              </div>
+
+              <div>
+                <div className="mb-1 flex items-center justify-between">
+                  <label className="text-xs font-bold text-brand-brown">
+                    Link URL Ulasan {receiptReviewEnabled ? '*' : '(Opsional)'}
+                  </label>
+                  <span className="text-[11px] tabular-nums text-brand-brown/55">
+                    {receiptReviewUrl.length}/200
+                  </span>
+                </div>
+                <input
+                  type="url"
+                  maxLength={200}
+                  value={receiptReviewUrl}
+                  onChange={(e) => setReceiptReviewUrl(e.target.value)}
+                  placeholder="https://g.page/r/..."
+                  className="h-10 w-full rounded-xl border border-brand-amber-soft bg-white px-3 font-mono text-xs text-brand-brown focus:border-brand-orange focus:outline-none"
+                />
+                <p className="mt-1 text-[11px] text-brand-brown/60">
+                  Gunakan tautan pendek (mis. <code>https://g.page/r/...</code> atau <code>https://maps.app.goo.gl/...</code>) agar QR 58mm cepat dipindai.
+                </p>
+              </div>
+            </div>
+
             <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
               <span className="text-[11px] text-brand-brown/60">
                 {receiptUpdatedMeta?.at
@@ -834,6 +926,25 @@ export function AdminUsersPage({
               {receiptFooter.trim() && (
                 <div className="mt-3 whitespace-pre-line border-t border-dashed border-slate-400 pt-2 text-center text-[10px] text-slate-600">
                   {receiptFooter.trim()}
+                </div>
+              )}
+              {receiptReviewEnabled && receiptReviewUrl.trim() && (
+                <div className="mt-3 space-y-1 border-t border-dashed border-slate-400 pt-2 text-center text-[10px] text-slate-700">
+                  {receiptReviewText.trim() ? (
+                    <p className="whitespace-pre-line font-semibold text-slate-800">
+                      {receiptReviewText.trim()}
+                    </p>
+                  ) : (
+                    <p className="font-bold uppercase tracking-wide text-slate-900">
+                      Beri Ulasan untuk Kami
+                    </p>
+                  )}
+                  <div className="mx-auto rounded-lg border border-dashed border-slate-400 bg-slate-50 px-2 py-1.5">
+                    <p className="font-bold uppercase text-slate-800">[QR Code Ulasan 58mm]</p>
+                    <p className="mt-0.5 break-all font-mono text-[9px] text-slate-600">
+                      {receiptReviewUrl.trim()}
+                    </p>
+                  </div>
                 </div>
               )}
             </div>

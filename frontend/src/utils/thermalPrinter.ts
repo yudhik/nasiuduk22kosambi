@@ -8,7 +8,13 @@ import { formatDateTime } from './format';
 
 export type ReceiptTextConfig = Pick<
   ReceiptSettings,
-  'header_text' | 'footer_text' | 'header_bold' | 'header_font_size'
+  | 'header_text'
+  | 'footer_text'
+  | 'header_bold'
+  | 'header_font_size'
+  | 'review_enabled'
+  | 'review_text'
+  | 'review_url'
 >;
 
 function resolveHeaderEscPosStyle(size: ReceiptHeaderFontSize | undefined): {
@@ -399,6 +405,29 @@ export function buildEscPosReceipt58mm(
     }
   }
 
+  // Review QR Section (PAID only; strictly mutually exclusive with issued vouchers so 58mm paper never prints 2 QRs)
+  const hasIssuedVouchers = (order.issued_vouchers ?? []).some((iv) => Boolean(iv.code?.trim()));
+  const reviewUrl = settings?.review_url?.trim() ?? '';
+  if (order.status === 'PAID' && !hasIssuedVouchers && settings?.review_enabled && reviewUrl) {
+    pushLine(divider);
+    pushBytes(0x1b, 0x61, 0x01); // Center
+    const reviewText = settings.review_text?.trim();
+    if (reviewText) {
+      for (const rawLine of reviewText.split('\n')) {
+        const trimmed = rawLine.trim();
+        if (!trimmed) continue;
+        for (const wrapped of wrapText(trimmed, WIDTH)) {
+          pushLine(wrapped);
+        }
+      }
+    } else {
+      pushBytes(0x1b, 0x45, 0x01);
+      pushLine('BERI ULASAN UNTUK KAMI');
+      pushBytes(0x1b, 0x45, 0x00);
+    }
+    appendEscPosQrCode(chunks, reviewUrl);
+  }
+
   // Feed 4 lines for manual tear bar on Iware X583
   pushBytes(0x1b, 0x64, 0x04);
 
@@ -409,7 +438,7 @@ function appendEscPosQrCode(chunks: number[], content: string, moduleSize?: numb
   const data = new TextEncoder().encode(content);
   if (data.length === 0 || data.length > 700) return;
   const autoSize =
-    data.length <= 24 ? 10 : data.length <= 48 ? 9 : data.length <= 84 ? 8 : 6;
+    data.length <= 24 ? 10 : data.length <= 48 ? 9 : data.length <= 84 ? 8 : data.length <= 120 ? 6 : 5;
   const clampedSize = Math.max(3, Math.min(16, moduleSize ?? autoSize));
   const storeLen = data.length + 3;
   const pL = storeLen & 0xff;
@@ -499,6 +528,25 @@ export function buildEscPosTestPrint58mm(settings?: ReceiptTextConfig | null): U
         pushLine(wrapped);
       }
     }
+  }
+  const testReviewUrl = settings?.review_url?.trim() ?? '';
+  if (settings?.review_enabled && testReviewUrl) {
+    pushLine('-'.repeat(WIDTH));
+    const reviewText = settings.review_text?.trim();
+    if (reviewText) {
+      for (const rawLine of reviewText.split('\n')) {
+        const trimmed = rawLine.trim();
+        if (!trimmed) continue;
+        for (const wrapped of wrapText(trimmed, WIDTH)) {
+          pushLine(wrapped);
+        }
+      }
+    } else {
+      pushBytes(0x1b, 0x45, 0x01);
+      pushLine('BERI ULASAN UNTUK KAMI');
+      pushBytes(0x1b, 0x45, 0x00);
+    }
+    appendEscPosQrCode(chunks, testReviewUrl);
   }
   pushBytes(0x1b, 0x64, 0x04);
   return new Uint8Array(chunks);

@@ -114,6 +114,9 @@ export interface ReceiptSettings {
   footer_text: string;
   header_bold: boolean;
   header_font_size: ReceiptHeaderFontSize;
+  review_enabled: boolean;
+  review_text: string;
+  review_url: string;
   updated_at: string;
   updated_by_username: string;
 }

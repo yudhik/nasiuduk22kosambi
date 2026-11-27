@@ -53,9 +53,10 @@ Aplikasi web POS & kontrol stok harian untuk **Nasi Uduk 22 Kosambi - Mpok Indri
 - **Printer Bluetooth 58mm Tanpa Dialog (Android — Iware X583)**:
   - Formatter ESC/POS 32 karakter/baris dengan koneksi **Web Bluetooth (BLE)** (*pair* 1× di awal shift, cetak berikutnya langsung keluar tanpa dialog browser).
   - Dilengkapi dukungan **RawBT Android (58mm)** dan **Browser Print Preview** (`58mm`, `80mm`, `A4`).
-- **Konfigurasi Header & Footer Nota (Khusus Admin)**:
+- **Konfigurasi Header, Footer & Bagian Ulasan Nota (Khusus Admin):**
   - Admin dapat mengatur teks **Header Nota** (multi-baris, maks. 8 baris / 300 karakter) dan **Footer Nota** (opsional, multi-baris) langsung dari tab **Admin → Header & Footer Nota** tanpa perlu compile ulang aplikasi.
   - Pengaturan gaya baris pertama header: **Cetak Tebal (Bold + Double-Strike)** dan **Ukuran Font ESC/POS** (`Normal 1x1`, `Tinggi 1x2`, `Lebar 2x1`, `Besar 2x2`) lengkap dengan live preview 58mm.
+  - **Bagian Ulasan Pelanggan (`0009_receipt_review_section.sql`):** Toggle QR Review (mis. Google Maps / IG / WhatsApp, maks. 200 karakter URL) di bawah footer struk `PAID`. Saat aktif, pemberian voucher otomatis & manual **otomatis dijeda** agar struk 58mm tidak mencetak 2 QR (penukaran voucher lama tetap berjalan normal).
 
 ### 6. Pengeluaran Toko (Tab Khusus Pemilik & Admin)
 - **Bebas Status Buka/Tutup Toko**: Pemilik dan Admin dapat mencatat, mengedit, dan menghapus pengeluaran kapan saja (`BELUM BUKA`, `BUKA`, maupun `TUTUP`) dengan pemilihan **tanggal bebas (`business_date`)**.
@@ -83,7 +84,7 @@ Aplikasi web POS & kontrol stok harian untuk **Nasi Uduk 22 Kosambi - Mpok Indri
 ```text
 application/
 ├── backend/
-│   ├── migrations/              # Embedded SQLite migrations (0001..0006, LF-only)
+│   ├── migrations/              # Embedded SQLite migrations (0001..0009, LF-only)
 │   ├── src/
 │   │   ├── auth.rs              # Argon2id, session cookies, lockout, CLI unlock
 │   │   ├── db.rs                # SQLite WAL pool, schema & optional sample seeding

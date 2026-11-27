@@ -413,7 +413,10 @@ export default function App() {
               {promoSubTab === 'promos' ? (
                 <PromotionsSection onToast={showToast} />
               ) : (
-                <VouchersSection onToast={showToast} />
+                <VouchersSection
+                  reviewSectionActive={Boolean(receiptSettings?.review_enabled)}
+                  onToast={showToast}
+                />
               )}
             </div>
           )}

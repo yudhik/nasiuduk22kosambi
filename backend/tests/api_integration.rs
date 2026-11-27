@@ -2552,3 +2552,288 @@ async fn test_vouchers_issue_redeem_stack_and_void() {
         .unwrap();
     assert_eq!(cnt, 2);
 }
+
+#[tokio::test]
+async fn test_receipt_review_section_blocks_voucher_issuance() {
+    let (app, _pool, admin_cookie) = setup_app().await;
+
+    // Create stock, menu, and open store
+    let stk = create_stock(&app, &admin_cookie, "Nasi Uduk Review", "porsi").await;
+    let (status, menu_val, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/menus",
+        Some(&admin_cookie),
+        Some(json!({
+            "name": "Nasi Uduk Review Test",
+            "category": "Nasi",
+            "price": 25000,
+            "stock_requirements": [{ "stock_item_id": stk.id, "qty_per_unit": 1 }]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let menu_id = menu_val["id"].as_i64().unwrap();
+
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/store/open",
+        Some(&admin_cookie),
+        Some(json!({ "stocks": [{ "stock_item_id": stk.id, "initial_stock": 20 }] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Create auto-issue voucher campaign + static voucher campaign
+    let (status, camp_val, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/vouchers",
+        Some(&admin_cookie),
+        Some(json!({
+            "name": "Voucher Auto 5K",
+            "code_mode": "DYNAMIC",
+            "code_template": "RVW-{RAND6}",
+            "display_format": "QR",
+            "receipt_message": "Potongan kunjungan berikutnya",
+            "auto_issue_on_pay": true,
+            "issue_min_order_amount": 20000,
+            "issue_regular_only": true,
+            "issue_quota_limit": 10,
+            "discount_type": "FIXED",
+            "discount_value": 5000,
+            "redeem_min_order_amount": 20000,
+            "redeem_regular_only": true,
+            "redeem_quota_limit": 10,
+            "is_active": true
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let camp_id = camp_val["id"].as_i64().unwrap();
+
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/vouchers",
+        Some(&admin_cookie),
+        Some(json!({
+            "name": "Voucher Member Static",
+            "code_mode": "STATIC",
+            "static_code": "MEMBER5K",
+            "display_format": "TEXT",
+            "auto_issue_on_pay": false,
+            "issue_min_order_amount": 0,
+            "issue_regular_only": true,
+            "issue_quota_limit": 10,
+            "discount_type": "FIXED",
+            "discount_value": 5000,
+            "redeem_min_order_amount": 20000,
+            "redeem_regular_only": true,
+            "redeem_quota_limit": 10,
+            "is_active": true
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    // 1. Validation: enabling review without URL or with invalid URL must fail (400)
+    let overlong_url = format!("https://g.page/r/{}", "a".repeat(190));
+    for bad_url in [
+        "",
+        "javascript:alert(1)",
+        "ftp://example.com",
+        "https://g.page/r/has space",
+        "https://localhost",
+        "https://g.page@evil.com",
+        "https://a..b",
+        "https://example.com:bad",
+        overlong_url.as_str(),
+    ] {
+        let (status, _, _) = send_json_with_cookie(
+            &app,
+            Method::PUT,
+            "/api/admin/receipt-settings",
+            Some(&admin_cookie),
+            Some(json!({
+                "header_text": "Nasi Uduk 22",
+                "footer_text": "Terima kasih!",
+                "header_bold": true,
+                "header_font_size": "tall",
+                "review_enabled": true,
+                "review_text": "Scan untuk ulasan",
+                "review_url": bad_url
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "expected 400 for bad_url={bad_url}");
+    }
+
+    // review_text > 160 chars or > 4 lines must fail (400)
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::PUT,
+        "/api/admin/receipt-settings",
+        Some(&admin_cookie),
+        Some(json!({
+            "header_text": "Nasi Uduk 22",
+            "footer_text": "Terima kasih!",
+            "header_bold": true,
+            "header_font_size": "tall",
+            "review_enabled": false,
+            "review_text": "1\n2\n3\n4\n5",
+            "review_url": ""
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // review_enabled: false with empty URL succeeds
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::PUT,
+        "/api/admin/receipt-settings",
+        Some(&admin_cookie),
+        Some(json!({
+            "header_text": "Nasi Uduk 22",
+            "footer_text": "Terima kasih!",
+            "header_bold": true,
+            "header_font_size": "tall",
+            "review_enabled": false,
+            "review_text": "",
+            "review_url": ""
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // 2. Enable Review Section with valid HTTPS URL
+    let (status, cfg_val, _) = send_json_with_cookie(
+        &app,
+        Method::PUT,
+        "/api/admin/receipt-settings",
+        Some(&admin_cookie),
+        Some(json!({
+            "header_text": "Nasi Uduk 22",
+            "footer_text": "Terima kasih!",
+            "header_bold": true,
+            "header_font_size": "tall",
+            "review_enabled": true,
+            "review_text": "Suka makanan kami? Beri ulasan di Google!",
+            "review_url": "https://g.page/r/nasiuduk22/review"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(cfg_val["review_enabled"], true);
+    assert_eq!(cfg_val["review_url"], "https://g.page/r/nasiuduk22/review");
+
+    // 3. Create Order 1, redeem existing STATIC voucher (must still work!), then pay -> auto-issue must be SKIPPED
+    let (status, o1_val, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/orders",
+        Some(&admin_cookie),
+        Some(json!({
+            "customer_label": "Pelanggan Review",
+            "items": [{ "menu_item_id": menu_id, "quantity": 1 }]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let o1: OrderDetail = serde_json::from_value(o1_val).unwrap();
+
+    let (status, redeemed_val, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        &format!("/api/orders/{}/voucher", o1.id),
+        Some(&admin_cookie),
+        Some(json!({ "code": "MEMBER5K" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let redeemed: OrderDetail = serde_json::from_value(redeemed_val).unwrap();
+    assert_eq!(redeemed.discount_amount, 5000);
+
+    let (status, paid1_val, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        &format!("/api/orders/{}/pay", o1.id),
+        Some(&admin_cookie),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let paid1: OrderDetail = serde_json::from_value(paid1_val).unwrap();
+    assert!(paid1.issued_vouchers.is_empty(), "auto-issue must be skipped while review section is active");
+
+    // 4. Manual voucher issue while review section is active must fail (409 Conflict)
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        &format!("/api/orders/{}/vouchers/issue", o1.id),
+        Some(&admin_cookie),
+        Some(json!({ "campaign_id": camp_id })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    // 5. Disable Review Section -> voucher auto-issue and manual issue work again
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::PUT,
+        "/api/admin/receipt-settings",
+        Some(&admin_cookie),
+        Some(json!({
+            "header_text": "Nasi Uduk 22",
+            "footer_text": "Terima kasih!",
+            "header_bold": true,
+            "header_font_size": "tall",
+            "review_enabled": false,
+            "review_text": "Suka makanan kami? Beri ulasan di Google!",
+            "review_url": "https://g.page/r/nasiuduk22/review"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Manual issue on Order 1 now succeeds
+    let (status, manual_val, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        &format!("/api/orders/{}/vouchers/issue", o1.id),
+        Some(&admin_cookie),
+        Some(json!({ "campaign_id": camp_id })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let manual_o1: OrderDetail = serde_json::from_value(manual_val).unwrap();
+    assert_eq!(manual_o1.issued_vouchers.len(), 1);
+
+    // Order 2 auto-issues normally on pay
+    let (status, o2_val, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/orders",
+        Some(&admin_cookie),
+        Some(json!({
+            "customer_label": "Pelanggan Voucher",
+            "items": [{ "menu_item_id": menu_id, "quantity": 1 }]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let o2: OrderDetail = serde_json::from_value(o2_val).unwrap();
+    let (status, paid2_val, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        &format!("/api/orders/{}/pay", o2.id),
+        Some(&admin_cookie),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let paid2: OrderDetail = serde_json::from_value(paid2_val).unwrap();
+    assert_eq!(paid2.issued_vouchers.len(), 1);
+}

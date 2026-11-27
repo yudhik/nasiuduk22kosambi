@@ -213,6 +213,9 @@ pub struct ReceiptSettings {
     pub footer_text: String,
     pub header_bold: bool,
     pub header_font_size: String,
+    pub review_enabled: bool,
+    pub review_text: String,
+    pub review_url: String,
     pub updated_at: String,
     pub updated_by_username: String,
 }
@@ -225,6 +228,12 @@ pub struct UpdateReceiptSettingsRequest {
     pub header_bold: bool,
     #[serde(default = "default_header_font_size")]
     pub header_font_size: String,
+    #[serde(default)]
+    pub review_enabled: bool,
+    #[serde(default)]
+    pub review_text: String,
+    #[serde(default)]
+    pub review_url: String,
 }
 
 fn default_header_bold() -> bool {

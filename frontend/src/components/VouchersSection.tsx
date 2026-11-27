@@ -35,10 +35,11 @@ function previewTemplate(tmpl: string): string {
 }
 
 interface VouchersSectionProps {
+  reviewSectionActive?: boolean;
   onToast: (title: string, description?: string, tone?: ToastMessage['tone']) => void;
 }
 
-export function VouchersSection({ onToast }: VouchersSectionProps) {
+export function VouchersSection({ reviewSectionActive = false, onToast }: VouchersSectionProps) {
   const [campaigns, setCampaigns] = useState<VoucherCampaign[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -279,6 +280,12 @@ export function VouchersSection({ onToast }: VouchersSectionProps) {
           </button>
         </div>
       </div>
+
+      {reviewSectionActive && (
+        <div className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-xs font-medium text-amber-900">
+          <strong>Bagian Ulasan (QR Review) pada struk sedang aktif</strong> — pemberian voucher otomatis &amp; manual dijeda sementara agar struk 58mm tidak mencetak 2 QR. Nonaktifkan di <strong>Admin → Pengaturan Struk</strong> untuk kembali memberikan voucher. Penukaran voucher lama tetap berjalan normal.
+        </div>
+      )}
 
       {error && (
         <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-medium text-rose-700">

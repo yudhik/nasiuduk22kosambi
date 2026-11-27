@@ -478,12 +478,79 @@ fn normalize_receipt_text(raw: &str) -> String {
         .to_string()
 }
 
+fn validate_review_url(raw: &str, required: bool) -> AppResult<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        if required {
+            return Err(AppError::Validation(
+                "Link URL ulasan wajib diisi saat Bagian Ulasan diaktifkan.".into(),
+            ));
+        }
+        return Ok(String::new());
+    }
+    if trimmed.len() > 200 {
+        return Err(AppError::Validation(
+            "Link URL ulasan maksimal 200 karakter agar QR thermal 58mm tetap mudah dipindai."
+                .into(),
+        ));
+    }
+    if !trimmed.bytes().all(|b| (0x21..=0x7E).contains(&b)) {
+        return Err(AppError::Validation(
+            "Link URL ulasan tidak boleh mengandung spasi atau karakter khusus non-ASCII.".into(),
+        ));
+    }
+    let (scheme, rest) = if trimmed.len() >= 8 && trimmed[..8].eq_ignore_ascii_case("https://") {
+        ("https://", &trimmed[8..])
+    } else if trimmed.len() >= 7 && trimmed[..7].eq_ignore_ascii_case("http://") {
+        ("http://", &trimmed[7..])
+    } else {
+        return Err(AppError::Validation(
+            "Link URL ulasan harus diawali dengan https:// atau http://.".into(),
+        ));
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if authority.is_empty() || authority.contains('@') {
+        return Err(AppError::Validation(
+            "Link URL ulasan harus memiliki nama domain yang valid tanpa kredensial (@).".into(),
+        ));
+    }
+    let host = match authority.split_once(':') {
+        Some((h, port_str)) => {
+            let port: u16 = port_str.parse().map_err(|_| {
+                AppError::Validation("Port pada link URL ulasan tidak valid.".into())
+            })?;
+            if port == 0 {
+                return Err(AppError::Validation(
+                    "Port pada link URL ulasan tidak valid.".into(),
+                ));
+            }
+            h
+        }
+        None => authority,
+    };
+    let labels: Vec<&str> = host.split('.').collect();
+    let valid_host = labels.len() >= 2
+        && labels.iter().all(|lbl| {
+            !lbl.is_empty()
+                && !lbl.starts_with('-')
+                && !lbl.ends_with('-')
+                && lbl.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        });
+    if !valid_host {
+        return Err(AppError::Validation(
+            "Link URL ulasan harus memiliki nama domain yang valid (contoh: https://g.page/r/...)."
+                .into(),
+        ));
+    }
+    Ok(format!("{scheme}{rest}"))
+}
+
 pub async fn get_receipt_settings(
     auth: AuthUser,
     State(state): State<AppState>,
 ) -> AppResult<Json<ReceiptSettings>> {
     let row: Option<ReceiptSettings> = sqlx::query_as(
-        "SELECT header_text, footer_text, header_bold, header_font_size, updated_at, updated_by_username FROM receipt_settings WHERE id = 1",
+        "SELECT header_text, footer_text, header_bold, header_font_size, review_enabled, review_text, review_url, updated_at, updated_by_username FROM receipt_settings WHERE id = 1",
     )
     .fetch_optional(&state.pool)
     .await?;
@@ -493,6 +560,9 @@ pub async fn get_receipt_settings(
         footer_text: DEFAULT_RECEIPT_FOOTER.to_string(),
         header_bold: true,
         header_font_size: DEFAULT_RECEIPT_HEADER_FONT_SIZE.to_string(),
+        review_enabled: false,
+        review_text: String::new(),
+        review_url: String::new(),
         updated_at: String::new(),
         updated_by_username: String::new(),
     });
@@ -514,6 +584,9 @@ pub async fn update_receipt_settings(
     let footer_text = normalize_receipt_text(&req.footer_text);
     let header_bold = req.header_bold;
     let header_font_size = normalize_receipt_font_size(&req.header_font_size)?;
+    let review_enabled = req.review_enabled;
+    let review_text = normalize_receipt_text(&req.review_text);
+    let review_url = validate_review_url(&req.review_url, review_enabled)?;
 
     if header_text.is_empty() {
         return Err(AppError::Validation(
@@ -535,19 +608,33 @@ pub async fn update_receipt_settings(
             "Header dan footer nota maksimal masing-masing 8 baris.".into(),
         ));
     }
+    if review_text.chars().count() > 160 {
+        return Err(AppError::Validation(
+            "Teks bagian ulasan maksimal 160 karakter.".into(),
+        ));
+    }
+    if review_text.lines().count() > 4 {
+        return Err(AppError::Validation(
+            "Teks bagian ulasan maksimal 4 baris.".into(),
+        ));
+    }
 
     let now = now_iso();
     let header_bold_int: i64 = if header_bold { 1 } else { 0 };
+    let review_enabled_int: i64 = if review_enabled { 1 } else { 0 };
     let mut tx = begin_write_tx(&state.pool).await?;
     sqlx::query(
         r#"
-        INSERT INTO receipt_settings (id, header_text, footer_text, header_bold, header_font_size, updated_at, updated_by_username)
-        VALUES (1, ?, ?, ?, ?, ?, ?)
+        INSERT INTO receipt_settings (id, header_text, footer_text, header_bold, header_font_size, review_enabled, review_text, review_url, updated_at, updated_by_username)
+        VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             header_text = excluded.header_text,
             footer_text = excluded.footer_text,
             header_bold = excluded.header_bold,
             header_font_size = excluded.header_font_size,
+            review_enabled = excluded.review_enabled,
+            review_text = excluded.review_text,
+            review_url = excluded.review_url,
             updated_at = excluded.updated_at,
             updated_by_username = excluded.updated_by_username
         "#,
@@ -556,6 +643,9 @@ pub async fn update_receipt_settings(
     .bind(&footer_text)
     .bind(header_bold_int)
     .bind(header_font_size)
+    .bind(review_enabled_int)
+    .bind(&review_text)
+    .bind(&review_url)
     .bind(&now)
     .bind(&auth.username)
     .execute(&mut *tx)
@@ -568,6 +658,8 @@ pub async fn update_receipt_settings(
         footer_len = footer_text.len(),
         header_bold,
         header_font_size,
+        review_enabled,
+        review_url_len = review_url.len(),
         "receipt settings updated"
     );
 
@@ -576,6 +668,9 @@ pub async fn update_receipt_settings(
         footer_text,
         header_bold,
         header_font_size: header_font_size.to_string(),
+        review_enabled,
+        review_text,
+        review_url,
         updated_at: now,
         updated_by_username: auth.username,
     }))

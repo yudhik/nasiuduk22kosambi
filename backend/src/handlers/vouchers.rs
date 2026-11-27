@@ -615,6 +615,14 @@ async fn issue_campaign_to_order_tx(
     Ok(row)
 }
 
+async fn is_receipt_review_enabled_tx(tx: &mut Transaction<'_, Sqlite>) -> AppResult<bool> {
+    let enabled: Option<i64> =
+        sqlx::query_scalar("SELECT review_enabled FROM receipt_settings WHERE id = 1")
+            .fetch_optional(&mut **tx)
+            .await?;
+    Ok(enabled.unwrap_or(0) != 0)
+}
+
 /// Automatically issues at most 1 eligible `auto_issue_on_pay = 1` voucher campaign when an order becomes `PAID`.
 pub(crate) async fn auto_issue_voucher_for_paid_order_tx(
     tx: &mut Transaction<'_, Sqlite>,
@@ -622,6 +630,10 @@ pub(crate) async fn auto_issue_voucher_for_paid_order_tx(
     actor_username: &str,
     now_iso_str: &str,
 ) -> AppResult<Option<IssuedVoucherDetail>> {
+    if is_receipt_review_enabled_tx(tx).await? {
+        return Ok(None);
+    }
+
     let now_dt = Local::now().format("%Y-%m-%dT%H:%M").to_string();
     let is_regular = is_order_regular_tx(tx, order).await?;
 
@@ -1153,6 +1165,11 @@ pub async fn issue_order_voucher(
     if order.status != "PAID" {
         return Err(AppError::Conflict(
             "Voucher hanya dapat diberikan pada nota yang sudah LUNAS.".into(),
+        ));
+    }
+    if is_receipt_review_enabled_tx(&mut tx).await? {
+        return Err(AppError::Conflict(
+            "Pemberian voucher dinonaktifkan saat Bagian Ulasan (Review QR) pada struk sedang aktif. Nonaktifkan Bagian Ulasan di Pengaturan Struk terlebih dahulu.".into(),
         ));
     }
 

@@ -7,7 +7,13 @@ interface ReceiptPrintViewProps {
   order: OrderDetail | null;
   receiptSettings?: Pick<
     ReceiptSettings,
-    'header_text' | 'footer_text' | 'header_bold' | 'header_font_size'
+    | 'header_text'
+    | 'footer_text'
+    | 'header_bold'
+    | 'header_font_size'
+    | 'review_enabled'
+    | 'review_text'
+    | 'review_url'
   > | null;
   onClose: () => void;
 }
@@ -258,6 +264,29 @@ export function ReceiptPrintView({ order, receiptSettings, onClose }: ReceiptPri
                 )}
               </div>
             ))}
+
+            {order.status === 'PAID' &&
+              !(order.issued_vouchers ?? []).some((iv) => Boolean(iv.code?.trim())) &&
+              receiptSettings?.review_enabled &&
+              receiptSettings.review_url?.trim() && (
+                <div className="mt-3 space-y-1.5 border-t border-dashed border-slate-400 pt-2.5 text-center text-[10px] text-slate-700">
+                  {receiptSettings.review_text?.trim() ? (
+                    <p className="whitespace-pre-line font-semibold text-slate-800">
+                      {receiptSettings.review_text.trim()}
+                    </p>
+                  ) : (
+                    <p className="font-bold uppercase tracking-wide text-slate-900">
+                      Beri Ulasan untuk Kami
+                    </p>
+                  )}
+                  <div className="mx-auto rounded-lg border border-dashed border-slate-400 bg-slate-50 px-2.5 py-2">
+                    <p className="font-bold uppercase text-slate-800">[QR Code Ulasan 58mm]</p>
+                    <p className="mt-0.5 break-all font-mono text-[9px] text-slate-600">
+                      {receiptSettings.review_url.trim()}
+                    </p>
+                  </div>
+                </div>
+              )}
           </div>
         </div>
 
