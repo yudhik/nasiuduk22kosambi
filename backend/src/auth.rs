@@ -61,7 +61,7 @@ impl Role {
     pub fn allowed_tabs(self) -> Vec<String> {
         match self {
             Role::Waiter => vec!["waiter".to_string()],
-            Role::Cashier => vec!["cashier".to_string()],
+            Role::Cashier => vec!["waiter".to_string(), "cashier".to_string()],
             Role::Owner => vec![
                 "waiter".to_string(),
                 "cashier".to_string(),

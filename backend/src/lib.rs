@@ -48,8 +48,15 @@ impl AppState {
     }
 }
 
+pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const APP_GIT_SHA: &str = env!("APP_GIT_SHA");
+
 async fn health_check() -> Json<Value> {
-    Json(json!({ "status": "ok" }))
+    Json(json!({
+        "status": "ok",
+        "version": APP_VERSION,
+        "git_sha": APP_GIT_SHA,
+    }))
 }
 
 /// Defense-in-depth CSRF guard for state-changing API routes:

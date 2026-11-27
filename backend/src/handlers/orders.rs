@@ -49,7 +49,7 @@ pub async fn create_order(
     State(state): State<AppState>,
     Json(req): Json<CreateOrderRequest>,
 ) -> AppResult<(StatusCode, Json<OrderDetail>)> {
-    auth.require_roles(&[Role::Waiter, Role::Owner, Role::Admin])?;
+    auth.require_roles(&[Role::Waiter, Role::Cashier, Role::Owner, Role::Admin])?;
     if req.items.is_empty() {
         return Err(AppError::Validation(
             "Nota harus memiliki minimal 1 item makanan/minuman".into(),

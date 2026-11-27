@@ -80,6 +80,11 @@ async function request<T>(
 }
 
 export const api = {
+  health: () =>
+    request<{ status: string; version: string; git_sha: string }>('/api/health', undefined, {
+      suppressUnauthorizedCallback: true,
+    }),
+
   // Authentication
   login: (username: string, password: string) =>
     request<AuthUser>(
