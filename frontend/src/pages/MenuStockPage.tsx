@@ -28,10 +28,17 @@ import type {
   SalesChannel,
   StockItem,
   StoreStatusResponse,
+  UserRole,
 } from '../types';
-import { formatDateTime, formatRupiah } from '../utils/format';
+import {
+  formatDateTime,
+  formatRupiah,
+  formatThousandsInput,
+  parseThousandsInput,
+} from '../utils/format';
 
 interface MenuStockPageProps {
+  currentUserRole: UserRole;
   storeStatus: StoreStatusResponse | null;
   onStoreChanged: () => void;
   onToast: (title: string, description?: string, tone?: ToastMessage['tone']) => void;
@@ -61,6 +68,7 @@ function generateMathChallenge(): MathChallenge {
 }
 
 export function MenuStockPage({
+  currentUserRole,
   storeStatus,
   onStoreChanged,
   onToast,
@@ -87,6 +95,12 @@ export function MenuStockPage({
   const [closingNotes, setClosingNotes] = useState('');
   const [mathChallenge, setMathChallenge] = useState<MathChallenge>(generateMathChallenge);
   const [mathAnswerInput, setMathAnswerInput] = useState('');
+
+  // Admin-only Reset & Rollback Day modal
+  const [resetDayModal, setResetDayModal] = useState(false);
+  const [resetMathChallenge, setResetMathChallenge] = useState<MathChallenge>(generateMathChallenge);
+  const [resetMathInput, setResetMathInput] = useState('');
+  const isAdmin = currentUserRole === 'admin';
 
   // Add/Edit Menu modal (with multi-stock picker)
   const [showMenuForm, setShowMenuForm] = useState(false);
@@ -266,6 +280,39 @@ export function MenuStockPage({
     }
   };
 
+  const triggerResetDaySheet = () => {
+    setResetMathChallenge(generateMathChallenge());
+    setResetMathInput('');
+    setError(null);
+    setResetDayModal(true);
+  };
+
+  const resetMathMatches =
+    Number(resetMathInput.trim()) === resetMathChallenge.answer && resetMathInput.trim() !== '';
+
+  const handleResetStoreDay = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!resetMathMatches) return;
+
+    try {
+      setSubmittingStore(true);
+      setError(null);
+      const res = await api.resetStoreDay();
+      setResetDayModal(false);
+      onStoreChanged();
+      await loadAll();
+      onToast(
+        'Data operasional hari ini direset',
+        `Backup tersimpan di server: ${res.backup_filename} (${res.deleted_orders} nota di-rollback).`,
+        'info'
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Gagal mereset data hari ini');
+    } finally {
+      setSubmittingStore(false);
+    }
+  };
+
   // === MENU CRUD & MULTI-STOCK ===
   const openCreateMenu = () => {
     setEditingMenu(null);
@@ -282,7 +329,7 @@ export function MenuStockPage({
     setEditingMenu(m);
     setMenuName(m.name);
     setMenuCategory(m.category);
-    setMenuPrice(String(m.price));
+    setMenuPrice(formatThousandsInput(String(m.price)));
     setMenuActive(m.is_active === 1);
     setMenuReqs(
       m.stock_requirements.map((r) => ({
@@ -307,7 +354,7 @@ export function MenuStockPage({
 
   const handleSaveMenu = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    const parsedPrice = Number(menuPrice);
+    const parsedPrice = parseThousandsInput(menuPrice);
     if (!menuName.trim() || Number.isNaN(parsedPrice) || parsedPrice < 0) {
       setError('Isi nama menu dan harga yang valid.');
       return;
@@ -610,6 +657,16 @@ export function MenuStockPage({
               >
                 <DoorClosed className="h-4 w-4" />
                 <span>Tutup Toko Hari Ini</span>
+              </button>
+            )}
+            {isAdmin && (isStoreOpen || isStoreClosed) && (
+              <button
+                type="button"
+                onClick={triggerResetDaySheet}
+                className="inline-flex h-11 items-center gap-2 rounded-xl border border-rose-300 bg-white px-3.5 text-xs font-extrabold text-rose-700 shadow-sm transition hover:bg-rose-50 sm:text-sm"
+              >
+                <RotateCcw className="h-4 w-4" />
+                <span>Reset Hari Ini</span>
               </button>
             )}
           </div>
@@ -1079,6 +1136,78 @@ export function MenuStockPage({
         </form>
       </BottomSheet>
 
+      {/* MODAL: ADMIN FORCE RESET & ROLLBACK TODAY */}
+      <BottomSheet
+        open={resetDayModal}
+        title="Reset & Rollback Operasional Hari Ini"
+        subtitle="Khusus Administrator. Server akan membuat file backup SQL terlebih dahulu sebelum menghapus data operasional hari ini."
+        onClose={() => setResetDayModal(false)}
+        footer={
+          <div className="grid grid-cols-2 gap-2.5">
+            <button
+              type="button"
+              onClick={() => setResetDayModal(false)}
+              className="h-11 rounded-xl border border-brand-amber-soft bg-white text-sm font-semibold text-brand-brown"
+            >
+              Batal
+            </button>
+            <button
+              type="button"
+              disabled={submittingStore || !resetMathMatches}
+              onClick={() => void handleResetStoreDay()}
+              className="h-11 rounded-xl bg-rose-600 text-sm font-bold text-white hover:bg-rose-700 disabled:cursor-not-allowed disabled:bg-stone-300"
+            >
+              {submittingStore ? 'Memproses Backup & Reset...' : 'Backup & Reset Hari Ini'}
+            </button>
+          </div>
+        }
+      >
+        <form onSubmit={handleResetStoreDay} className="space-y-4">
+          <div className="space-y-2 rounded-xl border border-rose-200 bg-rose-50/70 p-3.5 text-xs text-rose-900">
+            <div className="flex items-start gap-2 font-bold">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-rose-600" />
+              <span>Yang akan dilakukan untuk tanggal {storeStatus?.business_date}:</span>
+            </div>
+            <ul className="list-disc space-y-1 pl-6 text-rose-800">
+              <li>
+                Membuat file backup otomatis di server:{' '}
+                <code className="rounded bg-white/80 px-1 py-0.5 font-mono text-[11px]">
+                  force-backup-{'{timestamp}'}.sql
+                </code>
+              </li>
+              <li>
+                Menghapus seluruh nota, pergerakan stok, snapshot stok, dan status buka/tutup toko hari ini (kembali ke <strong>BELUM DIBUKA</strong>).
+              </li>
+              <li>
+                Data <strong>Pengeluaran</strong> hari ini, menu, stok master, dan riwayat hari sebelumnya <strong>tetap aman</strong>.
+              </li>
+            </ul>
+          </div>
+
+          <div className="rounded-2xl border-2 border-rose-200 bg-rose-50/70 p-3.5">
+            <p className="text-xs font-extrabold text-rose-900">
+              Verifikasi Keamanan (Cegah Reset Tidak Sengaja)
+            </p>
+            <p className="mt-1 text-xs text-rose-800">
+              Jawab hitungan berikut untuk mengaktifkan tombol Reset Hari Ini:
+            </p>
+            <div className="mt-2.5 flex items-center gap-3">
+              <span className="rounded-xl bg-white px-4 py-2 font-mono text-base font-extrabold text-brand-brown shadow-sm">
+                {resetMathChallenge.a} {resetMathChallenge.op} {resetMathChallenge.b} =
+              </span>
+              <input
+                type="number"
+                inputMode="numeric"
+                value={resetMathInput}
+                onChange={(e) => setResetMathInput(e.target.value)}
+                placeholder="Jawaban"
+                className="h-10 w-28 rounded-xl border border-rose-300 bg-white px-3 text-center text-base font-extrabold text-brand-brown focus:border-rose-500 focus:outline-none"
+              />
+            </div>
+          </div>
+        </form>
+      </BottomSheet>
+
       {/* MODAL: CLOSE STORE (WITH +/- MATH GUARD & OPTIONAL OPNAME) */}
       <BottomSheet
         open={closeStoreModal}
@@ -1244,12 +1373,12 @@ export function MenuStockPage({
             <div>
               <label className="mb-1 block text-xs font-semibold text-brand-brown/80">Harga (Rp)</label>
               <input
-                type="number"
-                min={0}
+                type="text"
+                inputMode="numeric"
                 value={menuPrice}
-                onChange={(e) => setMenuPrice(e.target.value)}
-                placeholder="25000"
-                className="h-11 w-full rounded-xl border border-brand-amber-soft px-3.5 text-sm text-brand-brown focus:border-brand-orange focus:outline-none"
+                onChange={(e) => setMenuPrice(formatThousandsInput(e.target.value))}
+                placeholder="25.000"
+                className="h-11 w-full rounded-xl border border-brand-amber-soft px-3.5 text-sm font-semibold tabular-nums text-brand-brown focus:border-brand-orange focus:outline-none"
               />
             </div>
           </div>

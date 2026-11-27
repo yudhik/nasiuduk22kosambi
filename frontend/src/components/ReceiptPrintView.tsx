@@ -1,19 +1,32 @@
 import { useState } from 'react';
 import { Printer, X } from 'lucide-react';
-import { STORE_NAME, type OrderDetail } from '../types';
+import { STORE_NAME, type OrderDetail, type ReceiptSettings } from '../types';
 import { formatDateTime, formatRupiah } from '../utils/format';
 
 interface ReceiptPrintViewProps {
   order: OrderDetail | null;
+  receiptSettings?: Pick<
+    ReceiptSettings,
+    'header_text' | 'footer_text' | 'header_bold' | 'header_font_size'
+  > | null;
   onClose: () => void;
 }
 
 type PaperSize = '58' | '80' | 'a4';
 
-export function ReceiptPrintView({ order, onClose }: ReceiptPrintViewProps) {
+export function ReceiptPrintView({ order, receiptSettings, onClose }: ReceiptPrintViewProps) {
   const [paperSize, setPaperSize] = useState<PaperSize>('58');
 
   if (!order) return null;
+
+  const headerLines = (receiptSettings?.header_text?.trim() || STORE_NAME)
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean);
+  const footerText =
+    receiptSettings !== undefined && receiptSettings !== null
+      ? receiptSettings.footer_text.trim()
+      : 'Terima kasih atas kunjungan Anda!';
 
   const statusLabel =
     order.status === 'PAID'
@@ -28,6 +41,16 @@ export function ReceiptPrintView({ order, onClose }: ReceiptPrintViewProps) {
       : paperSize === '80'
         ? 'receipt-paper-80 max-w-[320px]'
         : 'receipt-paper-a4 max-w-[560px]';
+
+  const headerBold = receiptSettings?.header_bold ?? true;
+  const headerSizeCls =
+    receiptSettings?.header_font_size === 'normal'
+      ? 'text-xs'
+      : receiptSettings?.header_font_size === 'wide'
+        ? 'text-sm tracking-widest'
+        : receiptSettings?.header_font_size === 'large'
+          ? 'text-lg leading-tight tracking-wide'
+          : 'text-base leading-snug tracking-wide';
 
   return (
     <div
@@ -81,7 +104,18 @@ export function ReceiptPrintView({ order, onClose }: ReceiptPrintViewProps) {
             className={`print-only-container mx-auto rounded-xl border border-brand-amber-soft bg-white p-5 font-mono text-xs text-slate-900 shadow-sm ${paperClass}`}
           >
             <div className="border-b border-dashed border-slate-400 pb-3 text-center">
-              <h2 className="text-sm font-bold uppercase tracking-wide">{STORE_NAME}</h2>
+              <h2
+                className={`uppercase ${headerSizeCls} ${
+                  headerBold ? 'font-extrabold' : 'font-normal'
+                }`}
+              >
+                {headerLines[0] ?? STORE_NAME}
+              </h2>
+              {headerLines.slice(1).map((line, idx) => (
+                <p key={idx} className="mt-0.5 text-[11px] text-slate-600">
+                  {line}
+                </p>
+              ))}
             </div>
 
             <div className="space-y-1 border-b border-dashed border-slate-400 py-2.5 text-[11px]">
@@ -161,9 +195,11 @@ export function ReceiptPrintView({ order, onClose }: ReceiptPrintViewProps) {
               </div>
             )}
 
-            <div className="mt-4 border-t border-dashed border-slate-400 pt-2.5 text-center text-[11px] text-slate-600">
-              Terima kasih atas kunjungan Anda!
-            </div>
+            {footerText && (
+              <div className="mt-4 whitespace-pre-line border-t border-dashed border-slate-400 pt-2.5 text-center text-[11px] text-slate-600">
+                {footerText}
+              </div>
+            )}
           </div>
         </div>
 

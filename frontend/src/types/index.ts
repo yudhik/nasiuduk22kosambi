@@ -99,6 +99,25 @@ export interface StoreStatusResponse {
   closing_summary: StoreDaySummary | null;
 }
 
+export interface ResetStoreDayResponse {
+  backup_filename: string;
+  deleted_orders: number;
+  deleted_snapshots: number;
+  deleted_movements: number;
+  store_status: StoreStatusResponse;
+}
+
+export type ReceiptHeaderFontSize = 'normal' | 'tall' | 'wide' | 'large';
+
+export interface ReceiptSettings {
+  header_text: string;
+  footer_text: string;
+  header_bold: boolean;
+  header_font_size: ReceiptHeaderFontSize;
+  updated_at: string;
+  updated_by_username: string;
+}
+
 export interface DailyExpense {
   id: number;
   business_date: string;

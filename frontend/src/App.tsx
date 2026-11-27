@@ -22,6 +22,7 @@ import {
   STORE_NAME,
   type AuthUser,
   type OrderDetail,
+  type ReceiptSettings,
   type StoreStatusResponse,
   type TabKey,
 } from './types';
@@ -51,6 +52,7 @@ export default function App() {
   const [refreshSignal, setRefreshSignal] = useState(0);
   const [unpaidCount, setUnpaidCount] = useState(0);
   const [storeStatus, setStoreStatus] = useState<StoreStatusResponse | null>(null);
+  const [receiptSettings, setReceiptSettings] = useState<ReceiptSettings | null>(null);
 
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const toastSeq = useRef(1);
@@ -83,6 +85,15 @@ export default function App() {
       setStoreStatus(st);
     } catch {
       // ignore silent status fetch errors
+    }
+  }, []);
+
+  const refreshReceiptSettings = useCallback(async () => {
+    try {
+      const cfg = await api.getReceiptSettings();
+      setReceiptSettings(cfg);
+    } catch {
+      // ignore silent receipt settings fetch errors
     }
   }, []);
 
@@ -135,6 +146,14 @@ export default function App() {
       // ignore silent badge refresh failures
     }
   }, [canSeeCashier]);
+
+  useEffect(() => {
+    if (user) {
+      void refreshReceiptSettings();
+    } else {
+      setReceiptSettings(null);
+    }
+  }, [user, refreshReceiptSettings]);
 
   useEffect(() => {
     if (user) {
@@ -327,6 +346,7 @@ export default function App() {
             <CashierOrdersPage
               currentUser={user}
               storeStatus={storeStatus}
+              receiptSettings={receiptSettings}
               onRefreshStoreStatus={refreshStoreStatus}
               onPrintPreview={setPrintOrder}
               refreshSignal={refreshSignal}
@@ -336,6 +356,7 @@ export default function App() {
           )}
           {activeTab === 'menu' && user.allowed_tabs.includes('menu') && (
             <MenuStockPage
+              currentUserRole={user.role}
               storeStatus={storeStatus}
               onStoreChanged={handleStoreChanged}
               onToast={showToast}
@@ -354,7 +375,11 @@ export default function App() {
             />
           )}
           {activeTab === 'users' && user.allowed_tabs.includes('users') && (
-            <AdminUsersPage currentUser={user} />
+            <AdminUsersPage
+              currentUser={user}
+              receiptSettings={receiptSettings}
+              onReceiptSettingsUpdated={setReceiptSettings}
+            />
           )}
         </main>
 
@@ -399,7 +424,11 @@ export default function App() {
       </div>
 
       {/* Printable Receipt Modal (Kasir Browser Fallback Preview) */}
-      <ReceiptPrintView order={printOrder} onClose={() => setPrintOrder(null)} />
+      <ReceiptPrintView
+        order={printOrder}
+        receiptSettings={receiptSettings}
+        onClose={() => setPrintOrder(null)}
+      />
     </>
   );
 }

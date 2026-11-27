@@ -198,6 +198,43 @@ pub struct CloseStoreRequest {
     pub closing_notes: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResetStoreDayResponse {
+    pub backup_filename: String,
+    pub deleted_orders: i64,
+    pub deleted_snapshots: i64,
+    pub deleted_movements: i64,
+    pub store_status: StoreStatusResponse,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct ReceiptSettings {
+    pub header_text: String,
+    pub footer_text: String,
+    pub header_bold: bool,
+    pub header_font_size: String,
+    pub updated_at: String,
+    pub updated_by_username: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateReceiptSettingsRequest {
+    pub header_text: String,
+    pub footer_text: String,
+    #[serde(default = "default_header_bold")]
+    pub header_bold: bool,
+    #[serde(default = "default_header_font_size")]
+    pub header_font_size: String,
+}
+
+fn default_header_bold() -> bool {
+    true
+}
+
+fn default_header_font_size() -> String {
+    "tall".to_string()
+}
+
 // ===== Daily Expenses =====
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]

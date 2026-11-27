@@ -9,8 +9,9 @@ use nota_digital_backend::{
     db::init_pool,
     models::{
         AdminUserSummary, AuthUserResponse, DailyExpense, DailyReportResponse,
-        ImportMenuCsvResponse, MenuItem, OrderDetail, PerformanceAnalyticsResponse, SalesChannel,
-        StockItem, StoreStatusResponse, UserSessionLog,
+        ImportMenuCsvResponse, MenuItem, OrderDetail, PerformanceAnalyticsResponse,
+        ReceiptSettings, ResetStoreDayResponse, SalesChannel, StockItem, StoreStatusResponse,
+        UserSessionLog,
     },
     AppState,
 };
@@ -1406,4 +1407,394 @@ async fn test_expense_categories_and_editable_expenses() {
         .unwrap();
     assert_eq!(st_closed.total_expenses, 3000);
     assert_eq!(st_closed.net_profit, -3000);
+}
+
+#[tokio::test]
+async fn test_admin_force_reset_store_day_and_sql_backup() {
+    let cfg = test_auth_config(5, 15);
+    let pool = init_pool("sqlite::memory:", false)
+        .await
+        .expect("failed to init in-memory sqlite");
+    sync_env_admin(&pool, &cfg)
+        .await
+        .expect("failed to sync env admin");
+
+    let temp_backup_dir = std::env::temp_dir().join(format!(
+        "nota_digital_test_backups_{}_{}",
+        std::process::id(),
+        chrono::Local::now().timestamp_nanos_opt().unwrap_or(0)
+    ));
+    let app = build_router(
+        AppState::new(pool.clone(), cfg.clone()).with_backup_dir(temp_backup_dir.clone()),
+        None,
+    );
+
+    let (status, _, admin_cookie) =
+        login_request(&app, &cfg.admin_username, &cfg.admin_password).await;
+    assert_eq!(status, StatusCode::OK);
+    let admin_cookie = admin_cookie.unwrap();
+
+    // Create an owner account to verify strict Admin-only RBAC
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/admin/users",
+        Some(&admin_cookie),
+        Some(json!({
+            "username": "owner_reset_test",
+            "full_name": "Pemilik Warung",
+            "role": "owner",
+            "password": "OwnerPassword123!"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, _, owner_cookie) =
+        login_request(&app, "owner_reset_test", "OwnerPassword123!").await;
+    assert_eq!(status, StatusCode::OK);
+    let owner_cookie = owner_cookie.unwrap();
+
+    // 1. Owner cannot reset store day (403 Forbidden)
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/store/reset-day",
+        Some(&owner_cookie),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // 2. Admin calling reset when NOT_OPENED and empty returns 409 Conflict and creates no backup
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/store/reset-day",
+        Some(&admin_cookie),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(!temp_backup_dir.exists());
+
+    // 3. Create stock + menu, open store, create & pay order (with single quotes), add expense, close store
+    let stock = create_stock(&app, &admin_cookie, "Nasi Uduk Reset Test", "porsi").await;
+    let (status, menu_val, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/menus",
+        Some(&admin_cookie),
+        Some(json!({
+            "name": "Nasi Uduk Komplit",
+            "category": "Makanan",
+            "price": 18000,
+            "stock_requirements": [{ "stock_item_id": stock.id, "qty_per_unit": 1 }]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let menu: MenuItem = serde_json::from_value(menu_val).unwrap();
+
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/store/open",
+        Some(&admin_cookie),
+        Some(json!({ "stocks": [{ "stock_item_id": stock.id, "initial_stock": 20 }] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (_, channels_val, _) =
+        send_json_with_cookie(&app, Method::GET, "/api/channels", Some(&admin_cookie), None).await;
+    let channels: Vec<SalesChannel> = serde_json::from_value(channels_val).unwrap();
+    let regular_id = channels.iter().find(|c| c.code == "regular").unwrap().id;
+
+    let (status, order_val, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/orders",
+        Some(&admin_cookie),
+        Some(json!({
+            "channel_id": regular_id,
+            "customer_label": "Pak O'Connor",
+            "notes": "Bungkus 'pedas'",
+            "items": [{ "menu_item_id": menu.id, "quantity": 2, "item_note": "Sambel 'ekstra'" }]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let order: OrderDetail = serde_json::from_value(order_val).unwrap();
+
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        &format!("/api/orders/{}/pay", order.id),
+        Some(&admin_cookie),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, exp_val, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/expenses",
+        Some(&admin_cookie),
+        Some(json!({ "title": "Beli gas LPG", "category": "Operasional", "amount": 25000 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let expense: DailyExpense = serde_json::from_value(exp_val).unwrap();
+
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/store/close",
+        Some(&admin_cookie),
+        Some(json!({ "closing_notes": "Tutup 'uji coba'" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // 4. Admin triggers force reset & rollback
+    let (status, reset_val, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/store/reset-day",
+        Some(&admin_cookie),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let reset_res: ResetStoreDayResponse = serde_json::from_value(reset_val).unwrap();
+    assert!(reset_res.backup_filename.starts_with("force-backup-"));
+    assert!(reset_res.backup_filename.ends_with(".sql"));
+    assert_eq!(reset_res.deleted_orders, 1);
+    assert!(reset_res.deleted_snapshots >= 1);
+    assert!(reset_res.deleted_movements >= 1);
+    assert_eq!(reset_res.store_status.status, "NOT_OPENED");
+
+    // 5. Verify backup file contents & that it executes cleanly back into SQLite
+    let backup_path = temp_backup_dir.join(&reset_res.backup_filename);
+    assert!(backup_path.exists());
+    let sql_text = std::fs::read_to_string(&backup_path).expect("read backup sql");
+    assert!(sql_text.contains("INSERT INTO store_days "));
+    assert!(sql_text.contains("INSERT INTO orders "));
+    assert!(sql_text.contains("INSERT INTO order_items "));
+    assert!(sql_text.contains("INSERT INTO order_stock_deductions "));
+    assert!(sql_text.contains("INSERT INTO daily_stock_item_snapshots "));
+    assert!(sql_text.contains("INSERT INTO stock_item_movements "));
+    assert!(sql_text.contains("Pak O''Connor"));
+    assert!(sql_text.contains("Bungkus ''pedas''"));
+    assert!(!sql_text.contains("INSERT INTO daily_expenses"));
+
+    // Verify daily_expenses were preserved
+    let (_, exps_after, _) =
+        send_json_with_cookie(&app, Method::GET, "/api/expenses", Some(&admin_cookie), None).await;
+    let exps_after: Vec<DailyExpense> = serde_json::from_value(exps_after).unwrap();
+    assert!(exps_after.iter().any(|e| e.id == expense.id));
+
+    // Verify restoring the generated SQL script works cleanly on SQLite without syntax/FK errors
+    sqlx::raw_sql(&sql_text)
+        .execute(&pool)
+        .await
+        .expect("generated force-backup SQL must execute cleanly");
+
+    let (_, restored_status_val, _) =
+        send_json_with_cookie(&app, Method::GET, "/api/store/status", Some(&admin_cookie), None)
+            .await;
+    let restored_status: StoreStatusResponse = serde_json::from_value(restored_status_val).unwrap();
+    assert_eq!(restored_status.status, "CLOSED");
+
+    // 6. Reset a second time (also validates filename collision handling if within same second)
+    //    and confirm the store can now be opened again for today!
+    let (status, reset_val2, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/store/reset-day",
+        Some(&admin_cookie),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let reset_res2: ResetStoreDayResponse = serde_json::from_value(reset_val2).unwrap();
+    assert!(temp_backup_dir.join(&reset_res2.backup_filename).exists());
+
+    let (status, reopened_val, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/store/open",
+        Some(&admin_cookie),
+        Some(json!({ "stocks": [{ "stock_item_id": stock.id, "initial_stock": 15 }] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let reopened: StoreStatusResponse = serde_json::from_value(reopened_val).unwrap();
+    assert_eq!(reopened.status, "OPEN");
+
+    // 7. Reset while OPEN (non-zero stock_items.current_stock == 15) and verify UPDATE stock_items backup + restore
+    let (status, reset_open_val, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/store/reset-day",
+        Some(&admin_cookie),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let reset_open: ResetStoreDayResponse = serde_json::from_value(reset_open_val).unwrap();
+    let open_sql = std::fs::read_to_string(temp_backup_dir.join(&reset_open.backup_filename))
+        .expect("read open-day backup sql");
+    assert!(open_sql.contains("UPDATE stock_items SET current_stock = 15"));
+    let (stock_after_reset,): (i64,) =
+        sqlx::query_as("SELECT current_stock FROM stock_items WHERE id = ?")
+            .bind(stock.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(stock_after_reset, 0);
+
+    sqlx::raw_sql(&open_sql)
+        .execute(&pool)
+        .await
+        .expect("open-day force-backup SQL must execute cleanly");
+    let (stock_restored,): (i64,) =
+        sqlx::query_as("SELECT current_stock FROM stock_items WHERE id = ?")
+            .bind(stock.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(stock_restored, 15);
+
+    let _ = std::fs::remove_dir_all(&temp_backup_dir);
+}
+
+#[tokio::test]
+async fn test_receipt_settings_admin_config_and_rbac() {
+    let (app, _pool, admin_cookie) = setup_app().await;
+
+    // Create cashier to verify read access vs admin-only write access
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/admin/users",
+        Some(&admin_cookie),
+        Some(json!({
+            "username": "kasir_receipt_test",
+            "full_name": "Kasir Struk",
+            "role": "cashier",
+            "password": "CashierPassword123!"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, _, cashier_cookie) =
+        login_request(&app, "kasir_receipt_test", "CashierPassword123!").await;
+    assert_eq!(status, StatusCode::OK);
+    let cashier_cookie = cashier_cookie.unwrap();
+
+    // 1. Unauthenticated access is rejected (401); seeded default is readable by cashier (with admin username redacted)
+    let (status, _, _) =
+        send_json_with_cookie(&app, Method::GET, "/api/receipt-settings", None, None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let (status, val, _) = send_json_with_cookie(
+        &app,
+        Method::GET,
+        "/api/receipt-settings",
+        Some(&cashier_cookie),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let initial: ReceiptSettings = serde_json::from_value(val).unwrap();
+    assert_eq!(initial.header_text, "Nasi Uduk 22 Kosambi - Mpok Indri");
+    assert_eq!(initial.footer_text, "Terima kasih atas kunjungan Anda!");
+    assert!(initial.header_bold);
+    assert_eq!(initial.header_font_size, "tall");
+    assert_eq!(initial.updated_by_username, "");
+
+    // 2. Non-admin cannot update receipt settings (403)
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::PUT,
+        "/api/admin/receipt-settings",
+        Some(&cashier_cookie),
+        Some(json!({ "header_text": "Hacked", "footer_text": "Nope" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // 3. Validation checks: blank/control-only header, >300 chars, >8 lines
+    for bad_body in [
+        json!({ "header_text": "   ", "footer_text": "OK" }),
+        json!({ "header_text": "\u{001b}\u{001d}", "footer_text": "OK" }),
+        json!({ "header_text": "A".repeat(301), "footer_text": "OK" }),
+        json!({ "header_text": "OK", "footer_text": "B".repeat(301) }),
+        json!({ "header_text": "1\n2\n3\n4\n5\n6\n7\n8\n9", "footer_text": "OK" }),
+        json!({ "header_text": "OK", "footer_text": "1\n2\n3\n4\n5\n6\n7\n8\n9" }),
+        json!({ "header_text": "OK", "footer_text": "OK", "header_bold": true, "header_font_size": "huge" }),
+    ] {
+        let (status, _, _) = send_json_with_cookie(
+            &app,
+            Method::PUT,
+            "/api/admin/receipt-settings",
+            Some(&admin_cookie),
+            Some(bad_body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    // 4. Admin updates multiline header/footer + bold/font size (CRLF normalized to LF)
+    let (status, upd_val, _) = send_json_with_cookie(
+        &app,
+        Method::PUT,
+        "/api/admin/receipt-settings",
+        Some(&admin_cookie),
+        Some(json!({
+            "header_text": "  Nasi Uduk 22 Kosambi\r\nJl. Kosambi No. 22  ",
+            "footer_text": "Terima kasih!\r\nWA: 0812-0000-0000",
+            "header_bold": false,
+            "header_font_size": "LARGE"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let updated: ReceiptSettings = serde_json::from_value(upd_val).unwrap();
+    assert_eq!(updated.header_text, "Nasi Uduk 22 Kosambi\nJl. Kosambi No. 22");
+    assert_eq!(updated.footer_text, "Terima kasih!\nWA: 0812-0000-0000");
+    assert!(!updated.header_bold);
+    assert_eq!(updated.header_font_size, "large");
+    assert_eq!(updated.updated_by_username, "superadmin");
+
+    // 5. Empty footer is allowed
+    let (status, empty_footer_val, _) = send_json_with_cookie(
+        &app,
+        Method::PUT,
+        "/api/admin/receipt-settings",
+        Some(&admin_cookie),
+        Some(json!({
+            "header_text": "Warung Mpok Indri",
+            "footer_text": "   "
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let empty_footer: ReceiptSettings = serde_json::from_value(empty_footer_val).unwrap();
+    assert_eq!(empty_footer.footer_text, "");
+
+    let (status, persisted_val, _) = send_json_with_cookie(
+        &app,
+        Method::GET,
+        "/api/receipt-settings",
+        Some(&cashier_cookie),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let persisted: ReceiptSettings = serde_json::from_value(persisted_val).unwrap();
+    assert_eq!(persisted.header_text, "Warung Mpok Indri");
+    assert_eq!(persisted.footer_text, "");
 }

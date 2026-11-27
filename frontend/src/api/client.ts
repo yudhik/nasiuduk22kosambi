@@ -13,6 +13,8 @@ import type {
   MenuItem,
   OrderDetail,
   PerformanceAnalyticsResponse,
+  ReceiptSettings,
+  ResetStoreDayResponse,
   SalesChannel,
   StockItem,
   StockMovement,
@@ -139,6 +141,20 @@ export const api = {
     return request<AuthEventLog[]>(`/api/admin/auth-events?${params.toString()}`);
   },
 
+  // Receipt Header / Footer Settings
+  getReceiptSettings: () => request<ReceiptSettings>('/api/receipt-settings'),
+
+  adminUpdateReceiptSettings: (payload: {
+    header_text: string;
+    footer_text: string;
+    header_bold: boolean;
+    header_font_size: ReceiptSettings['header_font_size'];
+  }) =>
+    request<ReceiptSettings>('/api/admin/receipt-settings', {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }),
+
   // Daily Store Open / Close Lifecycle
   getStoreStatus: () => request<StoreStatusResponse>('/api/store/status'),
 
@@ -159,6 +175,11 @@ export const api = {
     request<StoreStatusResponse>('/api/store/close', {
       method: 'POST',
       body: JSON.stringify(payload ?? {}),
+    }),
+
+  resetStoreDay: () =>
+    request<ResetStoreDayResponse>('/api/store/reset-day', {
+      method: 'POST',
     }),
 
   // Stock Items

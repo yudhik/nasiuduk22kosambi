@@ -8,7 +8,9 @@ import {
   KeyRound,
   Lock,
   Plus,
+  Receipt,
   RefreshCw,
+  Save,
   Shield,
   ShieldAlert,
   Unlock,
@@ -16,20 +18,25 @@ import {
 } from 'lucide-react';
 import { api } from '../api/client';
 import { BottomSheet } from '../components/BottomSheet';
-import type {
-  AdminUser,
-  AuthEventLog,
-  AuthUser,
-  UserRole,
-  UserSessionLog,
+import {
+  STORE_NAME,
+  type AdminUser,
+  type AuthEventLog,
+  type AuthUser,
+  type ReceiptHeaderFontSize,
+  type ReceiptSettings,
+  type UserRole,
+  type UserSessionLog,
 } from '../types';
 import { formatDateTimeSeconds } from '../utils/format';
 
 interface AdminUsersPageProps {
   currentUser: AuthUser;
+  receiptSettings: ReceiptSettings | null;
+  onReceiptSettingsUpdated: (settings: ReceiptSettings) => void;
 }
 
-type AdminSection = 'users' | 'sessions' | 'events';
+type AdminSection = 'users' | 'sessions' | 'events' | 'receipt';
 
 const ROLE_OPTIONS: Array<{ value: UserRole; label: string; desc: string }> = [
   { value: 'waiter', label: 'Pelayan', desc: 'Hanya akses Catat Nota' },
@@ -51,7 +58,11 @@ export function roleBadge(role: UserRole): { label: string; cls: string } {
   }
 }
 
-export function AdminUsersPage({ currentUser }: AdminUsersPageProps) {
+export function AdminUsersPage({
+  currentUser,
+  receiptSettings,
+  onReceiptSettingsUpdated,
+}: AdminUsersPageProps) {
   const [section, setSection] = useState<AdminSection>('users');
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [sessions, setSessions] = useState<UserSessionLog[]>([]);
@@ -60,6 +71,29 @@ export function AdminUsersPage({ currentUser }: AdminUsersPageProps) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+
+  // Receipt header/footer settings
+  const [receiptHeader, setReceiptHeader] = useState(
+    receiptSettings?.header_text ?? STORE_NAME
+  );
+  const [receiptFooter, setReceiptFooter] = useState(
+    receiptSettings?.footer_text ?? 'Terima kasih atas kunjungan Anda!'
+  );
+  const [receiptHeaderBold, setReceiptHeaderBold] = useState(
+    receiptSettings?.header_bold ?? true
+  );
+  const [receiptHeaderFontSize, setReceiptHeaderFontSize] = useState<ReceiptHeaderFontSize>(
+    receiptSettings?.header_font_size ?? 'tall'
+  );
+  const [receiptUpdatedMeta, setReceiptUpdatedMeta] = useState<{
+    at: string;
+    by: string;
+  } | null>(
+    receiptSettings?.updated_at
+      ? { at: receiptSettings.updated_at, by: receiptSettings.updated_by_username }
+      : null
+  );
+  const [savingReceipt, setSavingReceipt] = useState(false);
 
   // Create user modal
   const [createOpen, setCreateOpen] = useState(false);
@@ -84,20 +118,29 @@ export function AdminUsersPage({ currentUser }: AdminUsersPageProps) {
       setLoading(true);
       setError(null);
       const uid = filterUserId ? Number(filterUserId) : undefined;
-      const [uList, sList, eList] = await Promise.all([
+      const [uList, sList, eList, rCfg] = await Promise.all([
         api.adminListUsers(),
         api.adminListSessions(uid, 150),
         api.adminListAuthEvents(uid, 150),
+        api.getReceiptSettings(),
       ]);
       setUsers(uList);
       setSessions(sList);
       setEvents(eList);
+      setReceiptHeader(rCfg.header_text);
+      setReceiptFooter(rCfg.footer_text);
+      setReceiptHeaderBold(rCfg.header_bold);
+      setReceiptHeaderFontSize(rCfg.header_font_size);
+      setReceiptUpdatedMeta(
+        rCfg.updated_at ? { at: rCfg.updated_at, by: rCfg.updated_by_username } : null
+      );
+      onReceiptSettingsUpdated(rCfg);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Gagal memuat data pengguna');
     } finally {
       setLoading(false);
     }
-  }, [filterUserId]);
+  }, [filterUserId, onReceiptSettingsUpdated]);
 
   useEffect(() => {
     void loadAll();
@@ -110,6 +153,36 @@ export function AdminUsersPage({ currentUser }: AdminUsersPageProps) {
     const activeSessions = sessions.filter((s) => s.status === 'ACTIVE').length;
     return { total, active, locked, activeSessions };
   }, [users, sessions]);
+
+  const handleSaveReceiptSettings = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!receiptHeader.trim()) {
+      setError('Header nota wajib diisi.');
+      return;
+    }
+    try {
+      setSavingReceipt(true);
+      setError(null);
+      setNotice(null);
+      const updated = await api.adminUpdateReceiptSettings({
+        header_text: receiptHeader,
+        footer_text: receiptFooter,
+        header_bold: receiptHeaderBold,
+        header_font_size: receiptHeaderFontSize,
+      });
+      setReceiptHeader(updated.header_text);
+      setReceiptFooter(updated.footer_text);
+      setReceiptHeaderBold(updated.header_bold);
+      setReceiptHeaderFontSize(updated.header_font_size);
+      setReceiptUpdatedMeta({ at: updated.updated_at, by: updated.updated_by_username });
+      onReceiptSettingsUpdated(updated);
+      setNotice('Pengaturan header & footer nota berhasil disimpan dan langsung aktif.');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Gagal menyimpan pengaturan nota');
+    } finally {
+      setSavingReceipt(false);
+    }
+  };
 
   const handleCreateUser = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
@@ -348,9 +421,21 @@ export function AdminUsersPage({ currentUser }: AdminUsersPageProps) {
             <History className="h-3.5 w-3.5" />
             <span>Log Keamanan</span>
           </button>
+          <button
+            type="button"
+            onClick={() => setSection('receipt')}
+            className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-bold transition ${
+              section === 'receipt'
+                ? 'bg-brand-orange text-white'
+                : 'text-brand-brown/75 hover:bg-brand-cream'
+            }`}
+          >
+            <Receipt className="h-3.5 w-3.5" />
+            <span>Header &amp; Footer Nota</span>
+          </button>
         </div>
 
-        {section !== 'users' && (
+        {(section === 'sessions' || section === 'events') && (
           <select
             value={filterUserId}
             onChange={(e) => setFilterUserId(e.target.value)}
@@ -568,6 +653,177 @@ export function AdminUsersPage({ currentUser }: AdminUsersPageProps) {
                 )}
               </tbody>
             </table>
+          </div>
+        </div>
+      )}
+
+      {/* SECTION: RECEIPT HEADER & FOOTER */}
+      {section === 'receipt' && (
+        <div className="grid gap-4 lg:grid-cols-12">
+          <form
+            onSubmit={handleSaveReceiptSettings}
+            className="space-y-4 rounded-2xl border border-brand-amber-soft bg-white p-4 shadow-sm sm:p-5 lg:col-span-7"
+          >
+            <div>
+              <h3 className="text-sm font-extrabold text-brand-brown">
+                Konfigurasi Header &amp; Footer Struk Nota
+              </h3>
+              <p className="mt-0.5 text-xs text-brand-brown/70">
+                Perubahan langsung berlaku untuk cetak printer thermal 58mm (BLE / RawBT) dan preview browser tanpa perlu compile ulang aplikasi.
+              </p>
+            </div>
+
+            <div>
+              <div className="mb-1 flex items-center justify-between">
+                <label className="text-xs font-bold text-brand-brown">
+                  Header Nota (Baris 1 dicetak tebal)
+                </label>
+                <span className="text-[11px] tabular-nums text-brand-brown/55">
+                  {receiptHeader.length}/300
+                </span>
+              </div>
+              <textarea
+                rows={3}
+                maxLength={300}
+                value={receiptHeader}
+                onChange={(e) => setReceiptHeader(e.target.value)}
+                placeholder={'Nasi Uduk 22 Kosambi - Mpok Indri\nJl. Kosambi No. 22, Jakarta\nWA: 0812-xxxx-xxxx'}
+                className="w-full rounded-xl border border-brand-amber-soft bg-white px-3.5 py-2.5 text-sm text-brand-brown focus:border-brand-orange focus:outline-none"
+              />
+              <p className="mt-1 text-[11px] text-brand-brown/60">
+                Bisa beberapa baris (maks. 8 baris). Gaya Tebal &amp; Ukuran Font di bawah berlaku untuk baris pertama; baris berikutnya dicetak normal (cocok untuk alamat/WA).
+              </p>
+            </div>
+
+            <div className="grid gap-3 rounded-xl border border-brand-amber-soft/80 bg-brand-cream/40 p-3.5 sm:grid-cols-2">
+              <div>
+                <label className="mb-1 block text-xs font-bold text-brand-brown">
+                  Ukuran Font Baris 1 Header
+                </label>
+                <select
+                  value={receiptHeaderFontSize}
+                  onChange={(e) =>
+                    setReceiptHeaderFontSize(e.target.value as ReceiptHeaderFontSize)
+                  }
+                  className="h-10 w-full rounded-xl border border-brand-amber-soft bg-white px-3 text-xs font-bold text-brand-brown focus:border-brand-orange focus:outline-none"
+                >
+                  <option value="normal">Normal (1x1 • 32 kar/baris)</option>
+                  <option value="tall">Tinggi (1x2 • 32 kar/baris)</option>
+                  <option value="wide">Lebar (2x1 • 16 kar/baris)</option>
+                  <option value="large">Besar (2x2 • 16 kar/baris)</option>
+                </select>
+              </div>
+              <div className="flex items-end">
+                <label className="flex h-10 w-full cursor-pointer items-center gap-2.5 rounded-xl border border-brand-amber-soft bg-white px-3 text-xs font-bold text-brand-brown">
+                  <input
+                    type="checkbox"
+                    checked={receiptHeaderBold}
+                    onChange={(e) => setReceiptHeaderBold(e.target.checked)}
+                    className="h-4 w-4 accent-brand-orange"
+                  />
+                  <span>Cetak Tebal (Bold + Double-Strike)</span>
+                </label>
+              </div>
+            </div>
+
+            <div>
+              <div className="mb-1 flex items-center justify-between">
+                <label className="text-xs font-bold text-brand-brown">
+                  Footer Nota (Opsional)
+                </label>
+                <span className="text-[11px] tabular-nums text-brand-brown/55">
+                  {receiptFooter.length}/300
+                </span>
+              </div>
+              <textarea
+                rows={3}
+                maxLength={300}
+                value={receiptFooter}
+                onChange={(e) => setReceiptFooter(e.target.value)}
+                placeholder={'Terima kasih atas kunjungan Anda!\nIG: @nasiuduk22kosambi'}
+                className="w-full rounded-xl border border-brand-amber-soft bg-white px-3.5 py-2.5 text-sm text-brand-brown focus:border-brand-orange focus:outline-none"
+              />
+              <p className="mt-1 text-[11px] text-brand-brown/60">
+                Kosongkan jika tidak ingin mencetak pesan di bagian bawah struk.
+              </p>
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+              <span className="text-[11px] text-brand-brown/60">
+                {receiptUpdatedMeta?.at
+                  ? `Terakhir diubah ${formatDateTimeSeconds(receiptUpdatedMeta.at)} oleh @${receiptUpdatedMeta.by || 'system'}`
+                  : 'Menggunakan pengaturan default'}
+              </span>
+              <button
+                type="submit"
+                disabled={savingReceipt}
+                className="inline-flex h-11 items-center gap-2 rounded-xl bg-brand-orange px-4 text-xs font-extrabold text-white shadow-sm hover:bg-brand-orange-dark disabled:opacity-60 sm:text-sm"
+              >
+                <Save className="h-4 w-4" />
+                <span>{savingReceipt ? 'Menyimpan...' : 'Simpan Pengaturan Nota'}</span>
+              </button>
+            </div>
+          </form>
+
+          {/* Live 58mm Thermal Preview */}
+          <div className="rounded-2xl border border-brand-amber-soft bg-brand-cream/60 p-4 sm:p-5 lg:col-span-5">
+            <p className="mb-3 text-xs font-extrabold uppercase tracking-wide text-brand-brown/75">
+              Preview Struk 58mm (32 Karakter)
+            </p>
+            <div className="mx-auto max-w-[240px] rounded-xl border border-brand-amber-soft bg-white p-4 font-mono text-[11px] text-slate-900 shadow-sm">
+              <div className="border-b border-dashed border-slate-400 pb-2 text-center">
+                {(receiptHeader.trim() || STORE_NAME)
+                  .split('\n')
+                  .map((l) => l.trim())
+                  .filter(Boolean)
+                  .map((line, idx) => (
+                    <p
+                      key={idx}
+                      className={
+                        idx === 0
+                          ? `uppercase ${
+                              receiptHeaderFontSize === 'normal'
+                                ? 'text-xs'
+                                : receiptHeaderFontSize === 'wide'
+                                  ? 'text-sm tracking-widest'
+                                  : receiptHeaderFontSize === 'large'
+                                    ? 'text-base leading-tight tracking-wide'
+                                    : 'text-sm leading-snug tracking-wide'
+                            } ${receiptHeaderBold ? 'font-extrabold' : 'font-normal'}`
+                          : 'text-[10px] text-slate-600'
+                      }
+                    >
+                      {line}
+                    </p>
+                  ))}
+              </div>
+              <div className="space-y-0.5 border-b border-dashed border-slate-400 py-2 text-[10px] text-slate-600">
+                <div className="flex justify-between">
+                  <span>No. Nota</span>
+                  <span className="font-bold text-slate-900">ND-001</span>
+                </div>
+                <div className="flex justify-between">
+                  <span>Status</span>
+                  <span className="font-bold text-slate-900">LUNAS</span>
+                </div>
+              </div>
+              <div className="border-b border-dashed border-slate-400 py-2 text-[10px]">
+                <div className="flex justify-between font-semibold">
+                  <span>Nasi Uduk Komplit</span>
+                  <span>Rp18.000</span>
+                </div>
+                <div className="text-slate-500">1 x Rp18.000</div>
+              </div>
+              <div className="flex justify-between pt-2 text-xs font-bold">
+                <span>TOTAL</span>
+                <span>Rp18.000</span>
+              </div>
+              {receiptFooter.trim() && (
+                <div className="mt-3 whitespace-pre-line border-t border-dashed border-slate-400 pt-2 text-center text-[10px] text-slate-600">
+                  {receiptFooter.trim()}
+                </div>
+              )}
+            </div>
           </div>
         </div>
       )}

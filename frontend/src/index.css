@@ -6,6 +6,9 @@
   html {
     -webkit-tap-highlight-color: transparent;
     overscroll-behavior-y: contain;
+    overflow-y: scroll;
+    scrollbar-gutter: stable;
+    background-color: #FFFBF0;
   }
 
   body {

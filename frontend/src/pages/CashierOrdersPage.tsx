@@ -19,6 +19,7 @@ import type {
   AuthUser,
   OrderDetail,
   OrderStatus,
+  ReceiptSettings,
   SalesChannel,
   StoreStatusResponse,
 } from '../types';
@@ -39,6 +40,7 @@ import {
 interface CashierOrdersPageProps {
   currentUser: AuthUser;
   storeStatus: StoreStatusResponse | null;
+  receiptSettings: ReceiptSettings | null;
   onRefreshStoreStatus: () => Promise<void>;
   onPrintPreview: (order: OrderDetail) => void;
   refreshSignal: number;
@@ -51,6 +53,7 @@ type StatusFilter = 'UNPAID' | 'PAID' | 'VOIDED' | 'ALL';
 export function CashierOrdersPage({
   currentUser,
   storeStatus,
+  receiptSettings,
   onRefreshStoreStatus,
   onPrintPreview,
   refreshSignal,
@@ -155,7 +158,7 @@ export function CashierOrdersPage({
 
   const handleTestPrint = async () => {
     try {
-      await runThermalTestPrint(printerMode);
+      await runThermalTestPrint(printerMode, receiptSettings);
       onToast('Test print terkirim ke printer 58mm', undefined, 'success');
     } catch (err) {
       onToast(
@@ -169,7 +172,7 @@ export function CashierOrdersPage({
   const handlePrintOrder = async (order: OrderDetail) => {
     try {
       setPrintingId(order.id);
-      const result = await printOrderSilently(order, printerMode);
+      const result = await printOrderSilently(order, printerMode, receiptSettings);
       if (result === 'fallback_browser') {
         onPrintPreview(order);
       } else {
