@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   AlertCircle,
   Eye,
@@ -22,6 +22,24 @@ export function LoginPage({ onLoginSuccess }: LoginPageProps) {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isLockedError, setIsLockedError] = useState(false);
+  const [appVersion, setAppVersion] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    void api
+      .health()
+      .then((h) => {
+        if (!active || !h.version) return;
+        const sha = h.git_sha && h.git_sha !== 'unknown' ? ` (${h.git_sha})` : '';
+        setAppVersion(`v${h.version}${sha}`);
+      })
+      .catch(() => {
+        // ignore silent version fetch errors on login screen
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -151,6 +169,12 @@ export function LoginPage({ onLoginSuccess }: LoginPageProps) {
             </button>
           </form>
         </div>
+
+        {appVersion && (
+          <p className="mt-4 text-center font-mono text-[11px] font-medium text-brand-brown/50">
+            NotaDigital {appVersion}
+          </p>
+        )}
       </div>
     </div>
   );

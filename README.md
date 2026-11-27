@@ -207,6 +207,23 @@ npm run build
 
 ---
 
+## Versioning, Rilis & Rollback
+
+Proyek ini menggunakan **Semantic Versioning (`MAJOR.MINOR.PATCH`)** dengan sumber kebenaran di `backend/Cargo.toml` (dan `frontend/package.json`).
+
+- **Versi & Git SHA tertanam saat compile (`backend/build.rs`):**
+  - CLI: `nota-digital-backend --version` → `nota-digital-backend 1.0.0 (<git_sha>)`
+  - Health API: `GET /api/health` → `{"status":"ok","version":"1.0.0","git_sha":"<git_sha>"}`
+  - Ditampilkan di footer halaman Login dan header halaman Admin.
+- **Snapshot / Pre-release vs Rilis Stabil:**
+  - Snapshot / uji coba: gunakan label SemVer pre-release (mis. `1.1.0-rc.1`) dan publish sebagai GitHub Pre-release.
+  - Rilis produksi: naikkan versi di `Cargo.toml` & `package.json`, jalankan `cargo test` agar `Cargo.lock` tersinkronisasi, merge PR ke `main`, lalu buat tag Git `vX.Y.Z` & GitHub Release dengan arsip `nota-digital-vX.Y.Z-linux-amd64.tar.gz`.
+- **Rollback di VPS (`/opt/nota-digital/releases/`):**
+  - Setiap deploy menyimpan salinan rilis di `/opt/nota-digital/releases/vX.Y.Z/` beserta backup database online `/opt/nota-digital/backups/nota_digital.db.pre-deploy-vX.Y.Z-YYYYMMDD-HHMMSS`.
+  - Untuk rollback versi yang tidak menambah migrasi DB, cukup ganti biner & `static/` dari folder `releases/vX.Y.Z/` lalu restart `nota-digital`. Jika rollback melewati migrasi SQLx baru, pulihkan juga file backup SQLite sebelum deploy versi tersebut.
+
+---
+
 ## Lisensi
 
 Proyek ini dilisensikan di bawah **GNU Affero General Public License v3.0 (AGPL-3.0)** — lihat file [LICENSE](LICENSE) untuk detail lengkap.

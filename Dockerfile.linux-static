@@ -30,6 +30,9 @@ RUN mkdir -p src migrations \
     && rm -rf src
 
 # Build actual application (including embedded SQLite migrations)
+ARG GIT_SHA=unknown
+ENV GIT_SHA=${GIT_SHA}
+COPY backend/build.rs ./
 COPY backend/src ./src
 COPY backend/migrations ./migrations
 RUN touch src/main.rs src/lib.rs \

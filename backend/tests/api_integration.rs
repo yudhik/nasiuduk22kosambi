@@ -511,6 +511,14 @@ Tempe Goreng,Lauk,4000,
 async fn test_unified_login_rbac_paid_void_rules_and_session_timestamps() {
     let (app, _pool, admin_cookie) = setup_app().await;
 
+    // 0. Health check exposes app version & git_sha without requiring auth
+    let (status, health_val, _) =
+        send_json_with_cookie(&app, Method::GET, "/api/health", None, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(health_val["status"], "ok");
+    assert_eq!(health_val["version"], env!("CARGO_PKG_VERSION"));
+    assert!(!health_val["git_sha"].as_str().unwrap_or("").is_empty());
+
     // 1. Unauthenticated calls must return 401
     for path in [
         "/api/menus",

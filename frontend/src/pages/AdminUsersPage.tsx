@@ -71,6 +71,7 @@ export function AdminUsersPage({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [appVersion, setAppVersion] = useState<string | null>(null);
 
   // Receipt header/footer settings
   const [receiptHeader, setReceiptHeader] = useState(
@@ -118,15 +119,20 @@ export function AdminUsersPage({
       setLoading(true);
       setError(null);
       const uid = filterUserId ? Number(filterUserId) : undefined;
-      const [uList, sList, eList, rCfg] = await Promise.all([
+      const [uList, sList, eList, rCfg, hInfo] = await Promise.all([
         api.adminListUsers(),
         api.adminListSessions(uid, 150),
         api.adminListAuthEvents(uid, 150),
         api.getReceiptSettings(),
+        api.health().catch(() => null),
       ]);
       setUsers(uList);
       setSessions(sList);
       setEvents(eList);
+      if (hInfo?.version) {
+        const sha = hInfo.git_sha && hInfo.git_sha !== 'unknown' ? ` (${hInfo.git_sha})` : '';
+        setAppVersion(`v${hInfo.version}${sha}`);
+      }
       setReceiptHeader(rCfg.header_text);
       setReceiptFooter(rCfg.footer_text);
       setReceiptHeaderBold(rCfg.header_bold);
@@ -314,9 +320,16 @@ export function AdminUsersPage({
       {/* Header Bar */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h2 className="text-lg font-extrabold text-slate-900">
-            Kelola Pengguna &amp; Log Login
-          </h2>
+          <div className="flex flex-wrap items-center gap-2">
+            <h2 className="text-lg font-extrabold text-slate-900">
+              Kelola Pengguna &amp; Log Login
+            </h2>
+            {appVersion && (
+              <span className="rounded-full border border-brand-amber-soft bg-brand-cream px-2 py-0.5 font-mono text-[11px] font-bold text-brand-brown/80">
+                {appVersion}
+              </span>
+            )}
+          </div>
           <p className="text-xs text-slate-500">
             Atur akun staf, buka kunci akun yang terkunci, dan pantau waktu login/logout.
           </p>
