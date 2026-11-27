@@ -7,9 +7,9 @@ Aplikasi web POS & kontrol stok harian untuk **Nasi Uduk 22 Kosambi - Mpok Indri
 ## Fitur Utama
 
 ### 1. Autentikasi Terpadu, RBAC & Keamanan
-- **Unified Login** untuk seluruh peran dengan hak akses ketat:
+- **Unified Login** dengan hierarki hak akses bertingkat (`Pelayan` → `Kasir` → `Pemilik` → `Administrator`):
   - **Pelayan (`waiter`)**: Catat Nota saja.
-  - **Kasir (`cashier`)**: Kasir & Daftar Nota + cetak struk 58mm.
+  - **Kasir (`cashier`)**: Catat Nota + Kasir & Daftar Nota + cetak struk 58mm.
   - **Pemilik (`owner`)**: Catat Nota, Kasir, Menu & Stok (Buka/Tutup Toko), **Pengeluaran**, **Laporan & Analitik**, serta Void nota `PAID`.
   - **Administrator (`admin`)**: Akses penuh termasuk **Admin (Kelola Pengguna, Riwayat Sesi, Log Keamanan, Konfigurasi Header/Footer Nota)**, membuka akun terkunci, serta **Reset & Rollback Operasional Hari Ini**.
 - **Session & Audit Keamanan**:

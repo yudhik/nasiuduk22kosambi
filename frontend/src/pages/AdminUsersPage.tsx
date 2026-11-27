@@ -40,7 +40,7 @@ type AdminSection = 'users' | 'sessions' | 'events' | 'receipt';
 
 const ROLE_OPTIONS: Array<{ value: UserRole; label: string; desc: string }> = [
   { value: 'waiter', label: 'Pelayan', desc: 'Hanya akses Catat Nota' },
-  { value: 'cashier', label: 'Kasir', desc: 'Hanya akses Kasir & Nota' },
+  { value: 'cashier', label: 'Kasir', desc: 'Akses Catat Nota + Kasir & Nota' },
   { value: 'owner', label: 'Pemilik', desc: 'Semua fitur operasional (tanpa menu Admin)' },
   { value: 'admin', label: 'Administrator', desc: 'Akses penuh termasuk Kelola Pengguna & Log' },
 ];

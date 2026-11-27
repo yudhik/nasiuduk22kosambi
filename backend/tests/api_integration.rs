@@ -618,9 +618,37 @@ async fn test_unified_login_rbac_paid_void_rules_and_session_timestamps() {
     assert_eq!(order.status, "PAID");
     assert_eq!(order.waiter_name, "pelayan1");
 
-    // Cashier CANNOT void a PAID online order (403 Forbidden)
-    let (_, _, cashier_cookie) = login_request(&app, "kasir1", "password123").await;
+    // Cashier inherits Waiter permissions (tabs: ["waiter", "cashier"], can list menus & create orders)
+    // but CANNOT void a PAID online order (403 Forbidden) or manage menus (403 Forbidden)
+    let (_, cashier_val, cashier_cookie) = login_request(&app, "kasir1", "password123").await;
+    let cashier_me: AuthUserResponse = serde_json::from_value(cashier_val).unwrap();
+    assert_eq!(cashier_me.allowed_tabs, vec!["waiter", "cashier"]);
     let cashier_cookie = cashier_cookie.unwrap();
+
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::GET,
+        "/api/menus?active_only=true",
+        Some(&cashier_cookie),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, cashier_order_val, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/orders",
+        Some(&cashier_cookie),
+        Some(json!({
+            "channel_id": ch_gofood.id,
+            "items": [{ "menu_item_id": menu.id, "quantity": 1 }]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let cashier_order: OrderDetail = serde_json::from_value(cashier_order_val).unwrap();
+    assert_eq!(cashier_order.waiter_name, "kasir1");
 
     let (status, _, _) = send_json_with_cookie(
         &app,
@@ -632,7 +660,7 @@ async fn test_unified_login_rbac_paid_void_rules_and_session_timestamps() {
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 
-    // Owner CAN void the PAID order -> stock restores from 8 back to 10
+    // Owner CAN void the PAID order -> stock restores from 7 back to 9 (cashier's 1-qty order remains)
     let (status, _, _) = send_json_with_cookie(
         &app,
         Method::POST,
@@ -646,7 +674,7 @@ async fn test_unified_login_rbac_paid_void_rules_and_session_timestamps() {
     let (_, stocks_val, _) =
         send_json_with_cookie(&app, Method::GET, "/api/stocks", Some(&owner_cookie), None).await;
     let stocks: Vec<StockItem> = serde_json::from_value(stocks_val).unwrap();
-    assert_eq!(stocks.iter().find(|s| s.id == stk.id).unwrap().current_stock, 10);
+    assert_eq!(stocks.iter().find(|s| s.id == stk.id).unwrap().current_stock, 9);
 
     // Waiter logout records logout_at
     let (status, _, _) = send_json_with_cookie(

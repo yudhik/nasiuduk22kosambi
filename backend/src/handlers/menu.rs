@@ -197,7 +197,7 @@ pub async fn list_menus(
     State(state): State<AppState>,
     Query(query): Query<MenuQuery>,
 ) -> AppResult<Json<Vec<MenuItem>>> {
-    auth.require_roles(&[Role::Waiter, Role::Owner, Role::Admin])?;
+    auth.require_roles(&[Role::Waiter, Role::Cashier, Role::Owner, Role::Admin])?;
     let active_only = query.active_only.unwrap_or(false);
     let category = query
         .category
