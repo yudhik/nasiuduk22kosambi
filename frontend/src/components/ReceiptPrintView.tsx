@@ -7,7 +7,13 @@ interface ReceiptPrintViewProps {
   order: OrderDetail | null;
   receiptSettings?: Pick<
     ReceiptSettings,
-    'header_text' | 'footer_text' | 'header_bold' | 'header_font_size'
+    | 'header_text'
+    | 'footer_text'
+    | 'header_bold'
+    | 'header_font_size'
+    | 'review_enabled'
+    | 'review_text'
+    | 'review_url'
   > | null;
   onClose: () => void;
 }
@@ -177,6 +183,26 @@ export function ReceiptPrintView({ order, receiptSettings, onClose }: ReceiptPri
               </div>
             )}
 
+            {order.discount_amount > 0 && (
+              <div className="space-y-1 border-b border-dashed border-slate-400 py-2 text-[11px]">
+                <div className="flex justify-between">
+                  <span className="text-slate-600">Subtotal</span>
+                  <span>{formatRupiah(order.subtotal_amount)}</span>
+                </div>
+                <div className="flex justify-between text-emerald-700">
+                  <span>
+                    Diskon (
+                    {[
+                      ...order.applied_promotions.map((ap) => ap.promo_name_snapshot),
+                      ...(order.applied_vouchers ?? []).map((av) => `Voucher ${av.code_snapshot}`),
+                    ].join(', ') || 'Promo'}
+                    )
+                  </span>
+                  <span className="font-semibold">-{formatRupiah(order.discount_amount)}</span>
+                </div>
+              </div>
+            )}
+
             <div className="flex items-center justify-between pt-3 text-sm font-bold">
               <span>TOTAL</span>
               <span>{formatRupiah(order.total_amount)}</span>
@@ -200,6 +226,67 @@ export function ReceiptPrintView({ order, receiptSettings, onClose }: ReceiptPri
                 {footerText}
               </div>
             )}
+
+            {(order.issued_vouchers ?? []).map((iv) => (
+              <div
+                key={iv.id}
+                className="mt-3 space-y-1.5 border-t border-dashed border-slate-400 pt-2.5 text-center text-[10px] text-slate-700"
+              >
+                <p className="font-bold uppercase tracking-wide text-slate-900">
+                  Voucher Kunjungan Berikutnya
+                </p>
+                {iv.receipt_message_snapshot?.trim() && (
+                  <p className="whitespace-pre-line">{iv.receipt_message_snapshot.trim()}</p>
+                )}
+                {iv.display_format_snapshot === 'QR' ? (
+                  <div className="mx-auto rounded-lg border border-dashed border-slate-400 bg-slate-50 px-2.5 py-2">
+                    <p className="font-bold uppercase text-slate-800">[QR Code 58mm]</p>
+                    <p className="mt-0.5 font-mono text-xs font-extrabold tracking-wider text-slate-900">
+                      {iv.code}
+                    </p>
+                  </div>
+                ) : iv.display_format_snapshot === 'BARCODE' ? (
+                  <div className="mx-auto rounded-lg border border-dashed border-slate-400 bg-slate-50 px-2.5 py-2">
+                    <p className="font-bold uppercase text-slate-800">[Barcode CODE128]</p>
+                    <p className="mt-0.5 font-mono text-xs font-extrabold tracking-widest text-slate-900">
+                      {iv.code}
+                    </p>
+                  </div>
+                ) : (
+                  <p className="rounded-lg border border-dashed border-slate-400 bg-slate-50 px-2.5 py-1.5 font-mono text-sm font-extrabold tracking-wider text-slate-900">
+                    {iv.code}
+                  </p>
+                )}
+                {iv.expires_at && (
+                  <p className="text-[9px] text-slate-500">
+                    Berlaku s/d {iv.expires_at.replace('T', ' ')}
+                  </p>
+                )}
+              </div>
+            ))}
+
+            {order.status === 'PAID' &&
+              !(order.issued_vouchers ?? []).some((iv) => Boolean(iv.code?.trim())) &&
+              receiptSettings?.review_enabled &&
+              receiptSettings.review_url?.trim() && (
+                <div className="mt-3 space-y-1.5 border-t border-dashed border-slate-400 pt-2.5 text-center text-[10px] text-slate-700">
+                  {receiptSettings.review_text?.trim() ? (
+                    <p className="whitespace-pre-line font-semibold text-slate-800">
+                      {receiptSettings.review_text.trim()}
+                    </p>
+                  ) : (
+                    <p className="font-bold uppercase tracking-wide text-slate-900">
+                      Beri Ulasan untuk Kami
+                    </p>
+                  )}
+                  <div className="mx-auto rounded-lg border border-dashed border-slate-400 bg-slate-50 px-2.5 py-2">
+                    <p className="font-bold uppercase text-slate-800">[QR Code Ulasan 58mm]</p>
+                    <p className="mt-0.5 break-all font-mono text-[9px] text-slate-600">
+                      {receiptSettings.review_url.trim()}
+                    </p>
+                  </div>
+                </div>
+              )}
           </div>
         </div>
 

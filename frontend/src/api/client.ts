@@ -13,6 +13,7 @@ import type {
   MenuItem,
   OrderDetail,
   PerformanceAnalyticsResponse,
+  Promotion,
   ReceiptSettings,
   ResetStoreDayResponse,
   SalesChannel,
@@ -21,7 +22,10 @@ import type {
   StoreStatusResponse,
   UpdateMenuPayload,
   UpdateUserPayload,
+  UpsertPromotionPayload,
+  UpsertVoucherCampaignPayload,
   UserSessionLog,
+  VoucherCampaign,
 } from '../types';
 
 export class ApiError extends Error {
@@ -154,6 +158,9 @@ export const api = {
     footer_text: string;
     header_bold: boolean;
     header_font_size: ReceiptSettings['header_font_size'];
+    review_enabled: boolean;
+    review_text: string;
+    review_url: string;
   }) =>
     request<ReceiptSettings>('/api/admin/receipt-settings', {
       method: 'PUT',
@@ -318,6 +325,76 @@ export const api = {
     request<ExpenseCategory>(`/api/expense-categories/${id}`, {
       method: 'PUT',
       body: JSON.stringify(payload),
+    }),
+
+  // Promotions
+  listPromotions: (activeOnly = false) =>
+    request<Promotion[]>(`/api/promotions?active_only=${activeOnly}`),
+
+  createPromotion: (payload: UpsertPromotionPayload) =>
+    request<Promotion>('/api/promotions', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  updatePromotion: (id: number, payload: UpsertPromotionPayload) =>
+    request<Promotion>(`/api/promotions/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }),
+
+  deletePromotion: (id: number) =>
+    request<{ deleted: boolean; soft_deleted: boolean; reason?: string }>(`/api/promotions/${id}`, {
+      method: 'DELETE',
+    }),
+
+  applyOrderPromo: (orderId: number, promoId: number) =>
+    request<OrderDetail>(`/api/orders/${orderId}/promo`, {
+      method: 'POST',
+      body: JSON.stringify({ promo_id: promoId }),
+    }),
+
+  removeOrderPromo: (orderId: number) =>
+    request<OrderDetail>(`/api/orders/${orderId}/promo`, {
+      method: 'DELETE',
+    }),
+
+  // Vouchers
+  listVouchers: (activeOnly = false) =>
+    request<VoucherCampaign[]>(`/api/vouchers?active_only=${activeOnly}`),
+
+  createVoucher: (payload: UpsertVoucherCampaignPayload) =>
+    request<VoucherCampaign>('/api/vouchers', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  updateVoucher: (id: number, payload: UpsertVoucherCampaignPayload) =>
+    request<VoucherCampaign>(`/api/vouchers/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }),
+
+  deleteVoucher: (id: number) =>
+    request<{ deleted: boolean; soft_deleted: boolean; reason?: string }>(`/api/vouchers/${id}`, {
+      method: 'DELETE',
+    }),
+
+  applyOrderVoucher: (orderId: number, code: string) =>
+    request<OrderDetail>(`/api/orders/${orderId}/voucher`, {
+      method: 'POST',
+      body: JSON.stringify({ code }),
+    }),
+
+  removeOrderVoucher: (orderId: number) =>
+    request<OrderDetail>(`/api/orders/${orderId}/voucher`, {
+      method: 'DELETE',
+    }),
+
+  issueOrderVoucher: (orderId: number, campaignId: number) =>
+    request<OrderDetail>(`/api/orders/${orderId}/vouchers/issue`, {
+      method: 'POST',
+      body: JSON.stringify({ campaign_id: campaignId }),
     }),
 
   // Orders (Nota Digital)

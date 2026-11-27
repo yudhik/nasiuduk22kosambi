@@ -4,21 +4,28 @@ import {
   Bluetooth,
   BluetoothConnected,
   BluetoothOff,
+  Camera,
   CheckCircle2,
   Clock,
   Lock,
+  Percent,
   Printer,
   RefreshCw,
   Store,
+  Tag,
+  Ticket,
+  X,
   XCircle,
 } from 'lucide-react';
 import { api } from '../api/client';
 import { BottomSheet } from '../components/BottomSheet';
+import { VoucherScannerModal } from '../components/VoucherScannerModal';
 import type { ToastMessage } from '../components/ToastContainer';
 import type {
   AuthUser,
   OrderDetail,
   OrderStatus,
+  Promotion,
   ReceiptSettings,
   SalesChannel,
   StoreStatusResponse,
@@ -76,6 +83,15 @@ export function CashierOrdersPage({
   const [voidTarget, setVoidTarget] = useState<OrderDetail | null>(null);
   const [voidReason, setVoidReason] = useState('');
 
+  // Promo picker modal
+  const [activePromos, setActivePromos] = useState<Promotion[]>([]);
+  const [promoTarget, setPromoTarget] = useState<OrderDetail | null>(null);
+
+  // Voucher redeem + camera scanner modal
+  const [voucherTarget, setVoucherTarget] = useState<OrderDetail | null>(null);
+  const [voucherCodeInput, setVoucherCodeInput] = useState('');
+  const [scannerOpen, setScannerOpen] = useState(false);
+
   // Thermal Bluetooth printer state
   const [printerMode, setPrinterMode] = useState<PrinterMode>(getSavedPrinterMode);
   const [btState, setBtState] = useState<BluetoothPrinterState>(getBluetoothPrinterState);
@@ -93,12 +109,14 @@ export function CashierOrdersPage({
     try {
       setLoading(true);
       setError(null);
-      const [orderData, channelData] = await Promise.all([
+      const [orderData, channelData, promoData] = await Promise.all([
         api.listOrders(date, 'ALL'),
         api.listChannels(false),
+        api.listPromotions(true).catch(() => [] as Promotion[]),
       ]);
       setOrders(orderData);
       setChannels(channelData);
+      setActivePromos(promoData);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Gagal memuat daftar nota');
     } finally {
@@ -109,6 +127,48 @@ export function CashierOrdersPage({
   useEffect(() => {
     void loadOrders();
   }, [loadOrders, refreshSignal]);
+
+  const handleApplyVoucher = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!voucherTarget) return;
+    const code = voucherCodeInput.trim().toUpperCase();
+    if (!code) {
+      setError('Masukkan atau scan kode voucher terlebih dahulu.');
+      return;
+    }
+    try {
+      setBusyId(voucherTarget.id);
+      setError(null);
+      const updated = await api.applyOrderVoucher(voucherTarget.id, code);
+      setOrders((prev) => prev.map((o) => (o.id === updated.id ? updated : o)));
+      setVoucherTarget(null);
+      setVoucherCodeInput('');
+      onToast(
+        `Voucher ${code} diterapkan`,
+        `Total bayar menjadi ${formatRupiah(updated.total_amount)}`
+      );
+      onOrdersChanged();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Gagal menukar voucher');
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const handleRemoveVoucher = async (order: OrderDetail) => {
+    try {
+      setBusyId(order.id);
+      setError(null);
+      const updated = await api.removeOrderVoucher(order.id);
+      setOrders((prev) => prev.map((o) => (o.id === updated.id ? updated : o)));
+      onToast(`Voucher dihapus dari ${order.order_number}`, undefined, 'info');
+      onOrdersChanged();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Gagal menghapus voucher');
+    } finally {
+      setBusyId(null);
+    }
+  };
 
   const counts = useMemo(() => {
     let unpaid = 0;
@@ -187,6 +247,45 @@ export function CashierOrdersPage({
     }
   };
 
+  const handleApplyPromo = async (order: OrderDetail, promo: Promotion) => {
+    try {
+      setBusyId(order.id);
+      setError(null);
+      const updated = await api.applyOrderPromo(order.id, promo.id);
+      setPromoTarget(null);
+      onOrdersChanged();
+      await loadOrders();
+      onToast(
+        `Promo "${promo.name}" diterapkan`,
+        `Diskon -${formatRupiah(updated.discount_amount)} • Total ${formatRupiah(updated.total_amount)}`,
+        'success'
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Gagal menerapkan promo';
+      setError(msg);
+      onToast('Gagal menerapkan promo', msg, 'error');
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const handleRemovePromo = async (order: OrderDetail) => {
+    try {
+      setBusyId(order.id);
+      setError(null);
+      await api.removeOrderPromo(order.id);
+      onOrdersChanged();
+      await loadOrders();
+      onToast('Promo dihapus dari nota', undefined, 'info');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Gagal menghapus promo';
+      setError(msg);
+      onToast('Gagal menghapus promo', msg, 'error');
+    } finally {
+      setBusyId(null);
+    }
+  };
+
   const handlePay = async (order: OrderDetail) => {
     try {
       setBusyId(order.id);
@@ -248,8 +347,11 @@ export function CashierOrdersPage({
     );
   };
 
-  // Block cashier when today has not been opened yet (only on today's date)
+  // Block cashier when today has not been opened yet (only on today's date),
+  // while still letting cashiers switch to a prior date to settle leftover UNPAID orders.
   if (date === todayLocalDate() && storeStatus?.status === 'NOT_OPENED') {
+    const priorDate = storeStatus.pending_prior_date;
+    const priorCount = storeStatus.pending_prior_unpaid_count ?? 0;
     return (
       <div className="mx-auto max-w-lg rounded-3xl border border-brand-amber-soft bg-white p-8 text-center shadow-sm">
         <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-brand-cream-deep text-brand-orange">
@@ -259,14 +361,50 @@ export function CashierOrdersPage({
         <p className="mt-2 text-sm text-brand-brown/70">
           Pemilik atau Administrator perlu mengisi stok awal harian dan menekan &ldquo;Buka Toko&rdquo; terlebih dahulu.
         </p>
-        <button
-          type="button"
-          onClick={() => void onRefreshStoreStatus()}
-          className="mt-5 inline-flex h-11 items-center gap-2 rounded-xl bg-brand-orange px-5 text-sm font-bold text-white shadow-sm hover:bg-brand-orange-dark"
-        >
-          <RefreshCw className="h-4 w-4" />
-          <span>Periksa Status Toko</span>
-        </button>
+
+        {priorDate && priorCount > 0 && (
+          <div className="mt-5 rounded-2xl border border-amber-300 bg-amber-50 p-4 text-left">
+            <p className="text-xs font-extrabold text-amber-900">
+              Ada {priorCount} nota BELUM BAYAR dari tanggal {priorDate}
+            </p>
+            <p className="mt-1 text-xs text-amber-800">
+              Selesaikan (lunasi atau batalkan) nota tersebut terlebih dahulu agar toko hari ini dapat dibuka.
+            </p>
+            <button
+              type="button"
+              onClick={() => {
+                setDate(priorDate);
+                setStatusFilter('UNPAID');
+              }}
+              className="mt-3 inline-flex h-10 w-full items-center justify-center gap-2 rounded-xl bg-amber-600 px-4 text-xs font-extrabold text-white shadow-sm hover:bg-amber-700"
+            >
+              <Clock className="h-4 w-4" />
+              <span>
+                Buka {priorCount} Nota Belum Bayar ({priorDate})
+              </span>
+            </button>
+          </div>
+        )}
+
+        <div className="mt-5 flex flex-wrap items-center justify-center gap-2">
+          <button
+            type="button"
+            onClick={() => void onRefreshStoreStatus()}
+            className="inline-flex h-11 items-center gap-2 rounded-xl bg-brand-orange px-5 text-sm font-bold text-white shadow-sm hover:bg-brand-orange-dark"
+          >
+            <RefreshCw className="h-4 w-4" />
+            <span>Periksa Status Toko</span>
+          </button>
+          <input
+            type="date"
+            aria-label="Lihat nota tanggal lain"
+            value={date}
+            onChange={(e) => {
+              if (e.target.value) setDate(e.target.value);
+            }}
+            className="h-11 rounded-xl border border-brand-amber-soft bg-brand-cream/40 px-3 text-xs font-bold text-brand-brown focus:border-brand-orange focus:outline-none"
+          />
+        </div>
       </div>
     );
   }
@@ -523,6 +661,74 @@ export function CashierOrdersPage({
                     </p>
                   )}
 
+                  {order.applied_promotions.length > 0 && (
+                    <div className="mt-2 flex items-center justify-between gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 text-[11px] text-emerald-800">
+                      <div className="min-w-0">
+                        <span className="font-bold">
+                          Promo:{' '}
+                          {order.applied_promotions.map((ap) => ap.promo_name_snapshot).join(', ')}
+                        </span>
+                        <span className="ml-1.5 font-extrabold">
+                          (-{formatRupiah(order.discount_amount)})
+                        </span>
+                        <span className="block text-[10px] text-emerald-700/80">
+                          Subtotal {formatRupiah(order.subtotal_amount)} → Bayar{' '}
+                          {formatRupiah(order.total_amount)}
+                        </span>
+                      </div>
+                      {order.status === 'UNPAID' && !isTodayClosed && (
+                        <button
+                          type="button"
+                          disabled={busyId === order.id}
+                          onClick={() => void handleRemovePromo(order)}
+                          className="inline-flex h-7 items-center gap-1 rounded-lg border border-emerald-300 bg-white px-2 text-[10px] font-bold text-rose-700 hover:bg-rose-50"
+                          title="Hapus promo"
+                        >
+                          <X className="h-3 w-3" />
+                          <span>Hapus</span>
+                        </button>
+                      )}
+                    </div>
+                  )}
+
+                  {(order.applied_vouchers ?? []).length > 0 && (
+                    <div className="mt-2 flex items-center justify-between gap-2 rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-[11px] text-amber-900">
+                      <div className="min-w-0">
+                        <span className="font-bold">
+                          Voucher:{' '}
+                          {order.applied_vouchers
+                            .map((av) => `${av.code_snapshot} (-${formatRupiah(av.discount_amount)})`)
+                            .join(', ')}
+                        </span>
+                        <span className="block text-[10px] text-amber-800/80">
+                          Subtotal {formatRupiah(order.subtotal_amount)} → Bayar{' '}
+                          {formatRupiah(order.total_amount)}
+                        </span>
+                      </div>
+                      {order.status === 'UNPAID' && !isTodayClosed && (
+                        <button
+                          type="button"
+                          disabled={busyId === order.id}
+                          onClick={() => void handleRemoveVoucher(order)}
+                          className="inline-flex h-7 items-center gap-1 rounded-lg border border-amber-300 bg-white px-2 text-[10px] font-bold text-rose-700 hover:bg-rose-50"
+                          title="Hapus voucher"
+                        >
+                          <X className="h-3 w-3" />
+                          <span>Hapus</span>
+                        </button>
+                      )}
+                    </div>
+                  )}
+
+                  {(order.issued_vouchers ?? []).length > 0 && (
+                    <div className="mt-2 rounded-lg border border-sky-200 bg-sky-50 px-2.5 py-1.5 text-[11px] text-sky-900">
+                      <span className="font-bold">Voucher Diberikan di Struk: </span>
+                      <span className="font-mono font-extrabold">
+                        {order.issued_vouchers.map((iv) => iv.code).join(', ')}
+                      </span>
+                    </div>
+                  )}
+
                   {order.void_reason && (
                     <p className="mt-2 rounded-lg bg-rose-50 px-2.5 py-1.5 text-[11px] text-rose-700">
                       <strong>Alasan Batal:</strong> {order.void_reason}
@@ -532,6 +738,33 @@ export function CashierOrdersPage({
 
                 {/* Action Footer */}
                 <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-brand-amber-soft/50 pt-3">
+                  {order.status === 'UNPAID' && !isTodayClosed && activePromos.length > 0 && (
+                    <button
+                      type="button"
+                      disabled={busyId === order.id}
+                      onClick={() => setPromoTarget(order)}
+                      className="inline-flex h-10 items-center justify-center gap-1.5 rounded-xl border border-brand-amber bg-brand-cream px-3 text-xs font-bold text-brand-brown hover:bg-brand-cream-deep disabled:opacity-60"
+                    >
+                      <Percent className="h-3.5 w-3.5 text-brand-orange" />
+                      <span>{order.applied_promotions.length > 0 ? 'Ganti Promo' : 'Promo'}</span>
+                    </button>
+                  )}
+                  {order.status === 'UNPAID' && !isTodayClosed && (
+                    <button
+                      type="button"
+                      disabled={busyId === order.id}
+                      onClick={() => {
+                        setVoucherTarget(order);
+                        setVoucherCodeInput('');
+                      }}
+                      className="inline-flex h-10 items-center justify-center gap-1.5 rounded-xl border border-amber-300 bg-amber-50 px-3 text-xs font-bold text-amber-900 hover:bg-amber-100 disabled:opacity-60"
+                    >
+                      <Ticket className="h-3.5 w-3.5 text-brand-orange" />
+                      <span>
+                        {(order.applied_vouchers ?? []).length > 0 ? 'Ganti Voucher' : 'Voucher'}
+                      </span>
+                    </button>
+                  )}
                   {order.status === 'UNPAID' && !isTodayClosed && (
                     <button
                       type="button"
@@ -574,6 +807,98 @@ export function CashierOrdersPage({
           })}
         </div>
       )}
+
+      {/* Promo Picker Modal */}
+      <BottomSheet
+        open={Boolean(promoTarget)}
+        title="Terapkan Promo pada Nota"
+        subtitle={
+          promoTarget
+            ? `${promoTarget.order_number} • Subtotal ${formatRupiah(promoTarget.subtotal_amount)}`
+            : ''
+        }
+        onClose={() => setPromoTarget(null)}
+        footer={
+          <button
+            type="button"
+            onClick={() => setPromoTarget(null)}
+            className="h-11 w-full rounded-xl border border-brand-amber-soft bg-white text-sm font-semibold text-brand-brown"
+          >
+            Tutup
+          </button>
+        }
+      >
+        <div className="space-y-2.5">
+          {activePromos.length === 0 ? (
+            <p className="py-4 text-center text-sm text-brand-brown/70">
+              Belum ada promo aktif.
+            </p>
+          ) : (
+            activePromos.map((p) => {
+              const subtotal = promoTarget?.subtotal_amount ?? 0;
+              const isApplied = Boolean(
+                promoTarget?.applied_promotions.some((ap) => ap.promo_id === p.id)
+              );
+              const exhausted = p.remaining_quota <= 0 && !isApplied;
+              const belowMin = subtotal < p.min_order_amount;
+              const wrongChannel =
+                p.regular_only &&
+                promoTarget !== null &&
+                promoTarget.channel_name.toLowerCase() !== 'regular';
+              const disabled = exhausted || belowMin || wrongChannel || busyId === promoTarget?.id;
+
+              const estDiscount =
+                p.discount_type === 'PERCENT'
+                  ? Math.min(
+                      subtotal,
+                      p.max_discount ?? subtotal,
+                      Math.floor((subtotal * p.discount_value) / 100)
+                    )
+                  : Math.min(subtotal, p.discount_value);
+
+              return (
+                <button
+                  key={p.id}
+                  type="button"
+                  disabled={disabled}
+                  onClick={() => promoTarget && void handleApplyPromo(promoTarget, p)}
+                  className={`flex w-full items-center justify-between gap-3 rounded-xl border p-3 text-left transition ${
+                    isApplied
+                      ? 'border-emerald-400 bg-emerald-50'
+                      : disabled
+                        ? 'cursor-not-allowed border-stone-200 bg-stone-50 opacity-60'
+                        : 'border-brand-amber-soft bg-white hover:border-brand-orange hover:bg-brand-cream/40'
+                  }`}
+                >
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <Tag className="h-3.5 w-3.5 text-brand-orange" />
+                      <span className="text-sm font-bold text-brand-brown">{p.name}</span>
+                      <span className="rounded-full bg-brand-cream-deep px-2 py-0.5 text-[10px] font-bold text-brand-brown">
+                        Sisa {p.remaining_quota}/{p.quota_limit}
+                      </span>
+                    </div>
+                    <p className="mt-0.5 text-[11px] text-brand-brown/70">
+                      {exhausted
+                        ? 'Kuota promo sudah habis'
+                        : wrongChannel
+                          ? 'Khusus saluran Regular'
+                          : belowMin
+                            ? `Minimal belanja ${formatRupiah(p.min_order_amount)}`
+                            : `Potongan -${formatRupiah(estDiscount)} → Total ${formatRupiah(subtotal - estDiscount)}`}
+                    </p>
+                  </div>
+                  <span className="shrink-0 rounded-lg bg-emerald-100 px-2.5 py-1 text-xs font-extrabold text-emerald-800">
+                    {p.discount_type === 'FIXED'
+                      ? `-${formatRupiah(p.discount_value)}`
+                      : `-${p.discount_value}%`}
+                  </span>
+                </button>
+              );
+            })
+          )}
+        </div>
+      </BottomSheet>
 
       {/* Post-Payment Print-or-Skip Prompt */}
       <BottomSheet
@@ -618,6 +943,75 @@ export function CashierOrdersPage({
           )}
         </p>
       </BottomSheet>
+
+      {/* Voucher Redeem BottomSheet */}
+      <BottomSheet
+        open={Boolean(voucherTarget)}
+        title="Tukar Voucher Pelanggan"
+        subtitle={
+          voucherTarget
+            ? `${voucherTarget.order_number} • Subtotal ${formatRupiah(voucherTarget.subtotal_amount)}`
+            : ''
+        }
+        onClose={() => setVoucherTarget(null)}
+        footer={
+          <div className="grid grid-cols-2 gap-2.5">
+            <button
+              type="button"
+              onClick={() => setVoucherTarget(null)}
+              className="h-11 rounded-xl border border-brand-amber-soft bg-white text-sm font-semibold text-brand-brown"
+            >
+              Batal
+            </button>
+            <button
+              type="button"
+              disabled={busyId !== null || !voucherCodeInput.trim()}
+              onClick={() => void handleApplyVoucher()}
+              className="h-11 rounded-xl bg-brand-orange text-sm font-bold text-white hover:bg-brand-orange-dark disabled:opacity-60"
+            >
+              {busyId !== null ? 'Memproses...' : 'Terapkan Voucher'}
+            </button>
+          </div>
+        }
+      >
+        <form onSubmit={handleApplyVoucher} className="space-y-3">
+          <div>
+            <label className="mb-1 block text-xs font-semibold text-brand-brown/80">
+              Kode Voucher (Scan QR/Barcode atau Ketik Manual)
+            </label>
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={voucherCodeInput}
+                onChange={(e) => setVoucherCodeInput(e.target.value.toUpperCase())}
+                placeholder="cth: NU22-K7M9P2"
+                className="h-11 flex-1 rounded-xl border border-brand-amber-soft px-3.5 font-mono text-sm font-bold uppercase text-brand-brown focus:border-brand-orange focus:outline-none"
+                autoFocus
+              />
+              <button
+                type="button"
+                onClick={() => setScannerOpen(true)}
+                className="inline-flex h-11 shrink-0 items-center gap-1.5 rounded-xl border border-brand-amber bg-brand-cream px-3.5 text-xs font-bold text-brand-brown hover:bg-brand-cream-deep"
+              >
+                <Camera className="h-4 w-4 text-brand-orange" />
+                <span>Scan</span>
+              </button>
+            </div>
+          </div>
+          <p className="text-[11px] text-brand-brown/65">
+            Voucher dapat digabung (stack) dengan Promo Diskon pada nota yang sama.
+          </p>
+        </form>
+      </BottomSheet>
+
+      <VoucherScannerModal
+        open={scannerOpen}
+        onClose={() => setScannerOpen(false)}
+        onDetected={(code) => {
+          setVoucherCodeInput(code);
+          onToast(`Kode terdeteksi: ${code}`, 'Tekan "Terapkan Voucher" untuk memakai', 'info');
+        }}
+      />
 
       {/* Void Confirmation BottomSheet */}
       <BottomSheet

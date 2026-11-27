@@ -4,6 +4,8 @@ pub mod channels;
 pub mod expenses;
 pub mod menu;
 pub mod orders;
+pub mod promotions;
 pub mod reports;
 pub mod stocks;
 pub mod store;
+pub mod vouchers;
