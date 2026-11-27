@@ -383,7 +383,7 @@ export interface PerformanceAnalyticsResponse {
 
 export type UserRole = 'admin' | 'owner' | 'cashier' | 'waiter';
 
-export type TabKey = 'waiter' | 'cashier' | 'menu' | 'expenses' | 'report' | 'users';
+export type TabKey = 'waiter' | 'cashier' | 'menu' | 'promos' | 'expenses' | 'report' | 'users';
 
 export interface AuthUser {
   id: number;

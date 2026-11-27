@@ -4,11 +4,13 @@ import {
   ClipboardEdit,
   LogOut,
   Package,
+  Percent,
   Receipt,
   ShieldCheck,
   Wallet,
 } from 'lucide-react';
 import { api, setUnauthorizedHandler } from './api/client';
+import { PromotionsSection } from './components/PromotionsSection';
 import { ReceiptPrintView } from './components/ReceiptPrintView';
 import { ToastContainer, type ToastMessage } from './components/ToastContainer';
 import { AdminUsersPage, roleBadge } from './pages/AdminUsersPage';
@@ -37,6 +39,7 @@ const ALL_NAV_ITEMS: Array<{
   { key: 'waiter', label: 'Catat Nota', shortLabel: 'Catat', icon: ClipboardEdit },
   { key: 'cashier', label: 'Kasir & Nota', shortLabel: 'Kasir', icon: Receipt },
   { key: 'menu', label: 'Menu & Stok', shortLabel: 'Stok', icon: Package },
+  { key: 'promos', label: 'Promo', shortLabel: 'Promo', icon: Percent },
   { key: 'expenses', label: 'Pengeluaran', shortLabel: 'Biaya', icon: Wallet },
   { key: 'report', label: 'Laporan', shortLabel: 'Laporan', icon: BarChart3 },
   { key: 'users', label: 'Admin', shortLabel: 'Admin', icon: ShieldCheck },
@@ -217,15 +220,17 @@ export default function App() {
 
   const badge = roleBadge(user.role);
   const mobileGridClass =
-    visibleNavItems.length >= 6
-      ? 'grid-cols-6'
-      : visibleNavItems.length === 5
-        ? 'grid-cols-5'
-        : visibleNavItems.length === 4
-          ? 'grid-cols-4'
-          : visibleNavItems.length === 3
-            ? 'grid-cols-3'
-            : 'grid-cols-2';
+    visibleNavItems.length >= 7
+      ? 'grid-cols-7'
+      : visibleNavItems.length === 6
+        ? 'grid-cols-6'
+        : visibleNavItems.length === 5
+          ? 'grid-cols-5'
+          : visibleNavItems.length === 4
+            ? 'grid-cols-4'
+            : visibleNavItems.length === 3
+              ? 'grid-cols-3'
+              : 'grid-cols-2';
 
   const storePill =
     storeStatus?.status === 'OPEN'
@@ -361,6 +366,24 @@ export default function App() {
               onStoreChanged={handleStoreChanged}
               onToast={showToast}
             />
+          )}
+          {activeTab === 'promos' && user.allowed_tabs.includes('promos') && (
+            <div className="space-y-4">
+              <div className="flex items-center gap-2">
+                <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-brand-orange/15 text-brand-orange">
+                  <Percent className="h-5 w-5" />
+                </div>
+                <div>
+                  <h1 className="text-base font-extrabold text-brand-brown sm:text-lg">
+                    Promo &amp; Diskon
+                  </h1>
+                  <p className="text-xs text-brand-brown/70">
+                    Kelola promo berbasis kuota pelanggan dan Promo Section struk (QR / Barcode)
+                  </p>
+                </div>
+              </div>
+              <PromotionsSection onToast={showToast} />
+            </div>
           )}
           {activeTab === 'expenses' && user.allowed_tabs.includes('expenses') && (
             <ExpensesPage

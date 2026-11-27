@@ -63,8 +63,8 @@ Aplikasi web POS & kontrol stok harian untuk **Nasi Uduk 22 Kosambi - Mpok Indri
 - **Kategori Pengeluaran Dinamis (`expense_categories`)**: Kategori dapat ditambah, diubah nama (otomatis memperbarui label pada catatan pengeluaran), dan dinonaktifkan tanpa menghapus histori.
 - **Grafik Perbandingan Persentase Kategori**: Visualisasi *stacked bar* dan rincian persentase per kategori pengeluaran beserta input nominal berpemisah ribuan.
 
-### 7. Promo Berbasis Kuota & Promo Section Struk (QR / Barcode)
-- **Konfigurasi Promo (Pemilik & Admin di Menu & Stok → Promo):**
+### 7. Promo Berbasis Kuota & Promo Section Struk (Tab Khusus Pemilik & Admin)
+- **Konfigurasi Promo (Tab `Promo` untuk Pemilik & Admin):**
   - Mendukung potongan **Nominal (`FIXED` Rp)** maupun **Persentase (`PERCENT` % + batas maksimal Rp)**, minimal belanja, rentang tanggal opsional, dan pembatasan saluran (`Khusus Regular` atau semua channel).
   - **Kuota Pelanggan (`TOTAL` / `DAILY` / `UNLIMITED`)**: Contoh *"Promo 50 Pelanggan Pertama"* atau *"10 Pelanggan Pertama/Hari"* dengan validasi atomik di SQLite (kuota otomatis kembali jika promo dihapus atau nota dibatalkan/`VOIDED`).
 - **Promo Section Kondisional di Struk 58mm:**
