@@ -1,15 +1,6 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { Camera, Image as ImageIcon, X } from 'lucide-react';
-
-interface BarcodeDetectorLike {
-  detect: (source: ImageBitmapSource) => Promise<Array<{ rawValue?: string }>>;
-}
-
-declare global {
-  interface Window {
-    BarcodeDetector?: new (opts?: { formats?: string[] }) => BarcodeDetectorLike;
-  }
-}
+import type { Html5Qrcode } from 'html5-qrcode';
 
 interface VoucherScannerModalProps {
   open: boolean;
@@ -18,79 +9,117 @@ interface VoucherScannerModalProps {
 }
 
 /**
- * Lightweight zero-dependency QR & CODE128 Barcode scanner using Android Chrome's native
- * `BarcodeDetector` API over `getUserMedia`, with a still-photo fallback for plain-HTTP LAN.
+ * Cross-browser QR & CODE128 Barcode scanner (lazy-loaded `html5-qrcode`)
+ * with live camera on HTTPS/localhost and native photo-capture fallback for plain-HTTP LAN.
  */
 export function VoucherScannerModal({ open, onClose, onDetected }: VoucherScannerModalProps) {
-  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const rawId = useId();
+  const readerId = `voucher-qr-reader-${rawId.replace(/[^a-zA-Z0-9_-]/g, '')}`;
+  const scannerRef = useRef<Html5Qrcode | null>(null);
+  const runningRef = useRef(false);
+  const onDetectedRef = useRef(onDetected);
+  const onCloseRef = useRef(onClose);
+  onDetectedRef.current = onDetected;
+  onCloseRef.current = onClose;
+
   const [statusMsg, setStatusMsg] = useState('Menyiapkan kamera...');
   const [cameraError, setCameraError] = useState<string | null>(null);
-  const detectorSupported = typeof window !== 'undefined' && 'BarcodeDetector' in window;
+  const [decodingPhoto, setDecodingPhoto] = useState(false);
+
+  const stopScannerSafely = async () => {
+    const inst = scannerRef.current;
+    if (!inst) return;
+    if (runningRef.current) {
+      runningRef.current = false;
+      try {
+        await inst.stop();
+      } catch {
+        // ignore stop errors when camera was never started
+      }
+    }
+    try {
+      inst.clear();
+    } catch {
+      // ignore clear errors
+    }
+  };
 
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
-    let stream: MediaStream | null = null;
-    let timer: number | null = null;
 
     const startCamera = async () => {
       setCameraError(null);
-      if (!detectorSupported) {
-        setCameraError(
-          'Browser ini belum mendukung pemindai otomatis (BarcodeDetector). Gunakan Android Chrome atau ketik kode voucher secara manual.'
-        );
-        return;
-      }
+      setStatusMsg('Menyiapkan kamera...');
+
       if (!navigator.mediaDevices?.getUserMedia) {
         setCameraError(
-          'Kamera live memerlukan HTTPS (atau localhost). Untuk uji di LAN HTTP, gunakan tombol "Ambil Foto" di bawah atau ketik kode secara manual.'
+          'Kamera live memerlukan HTTPS (atau localhost). Di jaringan LAN HTTP, tekan tombol "Ambil Foto QR / Barcode" di bawah untuk membuka kamera HP.'
         );
+        setStatusMsg('Gunakan tombol Ambil Foto di bawah atau ketik kode manual.');
         return;
       }
+
       try {
-        setStatusMsg('Arahkan kamera ke QR / Barcode voucher...');
-        stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: { ideal: 'environment' } },
-          audio: false,
+        const { Html5Qrcode: Html5QrcodeCtor, Html5QrcodeSupportedFormats } = await import(
+          'html5-qrcode'
+        );
+        if (cancelled) return;
+
+        const scanner = new Html5QrcodeCtor(readerId, {
+          formatsToSupport: [
+            Html5QrcodeSupportedFormats.QR_CODE,
+            Html5QrcodeSupportedFormats.CODE_128,
+          ],
+          verbose: false,
         });
+        scannerRef.current = scanner;
+
+        const config = {
+          fps: 10,
+          qrbox: { width: 220, height: 180 },
+          aspectRatio: 4 / 3,
+        };
+
+        const handleSuccess = (decodedText: string) => {
+          const clean = decodedText.trim();
+          if (!clean || cancelled) return;
+          cancelled = true;
+          void stopScannerSafely().finally(() => {
+            onDetectedRef.current(clean.toUpperCase());
+            onCloseRef.current();
+          });
+        };
+
+        // Prefer rear camera on mobile; fallback to any available webcam on desktop
+        try {
+          await scanner.start({ facingMode: 'environment' }, config, handleSuccess, () => {});
+        } catch {
+          if (cancelled) return;
+          const cameras = await Html5QrcodeCtor.getCameras();
+          if (cancelled) return;
+          if (!cameras.length) {
+            throw new Error('Tidak ada kamera yang terdeteksi pada perangkat ini.');
+          }
+          await scanner.start(cameras[0].id, config, handleSuccess, () => {});
+        }
+
         if (cancelled) {
-          stream.getTracks().forEach((t) => t.stop());
+          runningRef.current = true;
+          await stopScannerSafely();
           return;
         }
-        const video = videoRef.current;
-        if (video) {
-          video.srcObject = stream;
-          await video.play();
-        }
-        const detector = new window.BarcodeDetector!({
-          formats: ['qr_code', 'code_128'],
-        });
-        const scanLoop = async () => {
-          if (cancelled || !videoRef.current) return;
-          try {
-            if (videoRef.current.readyState >= 2) {
-              const results = await detector.detect(videoRef.current);
-              const raw = results.find((r) => r.rawValue?.trim())?.rawValue?.trim();
-              if (raw) {
-                cancelled = true;
-                onDetected(raw.toUpperCase());
-                onClose();
-                return;
-              }
-            }
-          } catch {
-            // Ignore transient frame decode errors
-          }
-          timer = window.setTimeout(() => void scanLoop(), 250);
-        };
-        timer = window.setTimeout(() => void scanLoop(), 300);
+        runningRef.current = true;
+        setStatusMsg('Arahkan kamera ke QR / Barcode voucher...');
       } catch (err) {
         if (!cancelled) {
+          const msg = err instanceof Error ? err.message : String(err);
           setCameraError(
-            err instanceof Error
-              ? `Gagal membuka kamera: ${err.message}`
-              : 'Gagal membuka kamera. Pastikan izin kamera aktif.'
+            msg.includes('Permission') || msg.includes('NotAllowed')
+              ? 'Izin kamera ditolak. Izinkan akses kamera di browser atau gunakan "Ambil Foto QR / Barcode" di bawah.'
+              : `Gagal membuka kamera: ${msg}`
           );
+          setStatusMsg('Coba tombol Ambil Foto di bawah atau ketik kode manual.');
         }
       }
     };
@@ -99,38 +128,63 @@ export function VoucherScannerModal({ open, onClose, onDetected }: VoucherScanne
 
     return () => {
       cancelled = true;
-      if (timer !== null) window.clearTimeout(timer);
-      if (stream) stream.getTracks().forEach((t) => t.stop());
+      void stopScannerSafely();
+      scannerRef.current = null;
     };
-  }, [open, detectorSupported, onDetected, onClose]);
+  }, [open, readerId]);
 
   const handlePhotoCapture = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = '';
-    if (!file || !window.BarcodeDetector) return;
+    if (!file) return;
+
     try {
+      setDecodingPhoto(true);
       setStatusMsg('Memindai foto voucher...');
-      const bitmap = await createImageBitmap(file);
-      const detector = new window.BarcodeDetector({ formats: ['qr_code', 'code_128'] });
-      const results = await detector.detect(bitmap);
-      bitmap.close();
-      const raw = results.find((r) => r.rawValue?.trim())?.rawValue?.trim();
-      if (raw) {
-        onDetected(raw.toUpperCase());
-        onClose();
+      await stopScannerSafely();
+
+      const { Html5Qrcode: Html5QrcodeCtor, Html5QrcodeSupportedFormats } = await import(
+        'html5-qrcode'
+      );
+      const photoScanner = new Html5QrcodeCtor(readerId, {
+        formatsToSupport: [
+          Html5QrcodeSupportedFormats.QR_CODE,
+          Html5QrcodeSupportedFormats.CODE_128,
+        ],
+        verbose: false,
+      });
+      scannerRef.current = photoScanner;
+      const decodedText = await photoScanner.scanFile(file, false);
+      const clean = decodedText.trim();
+      if (clean) {
+        onDetectedRef.current(clean.toUpperCase());
+        onCloseRef.current();
       } else {
-        setCameraError('Kode QR / Barcode tidak terbaca di foto. Coba lebih dekat atau ketik manual.');
+        setCameraError(
+          'Kode QR / Barcode tidak terbaca di foto. Coba lebih dekat & terang, atau ketik manual.'
+        );
       }
     } catch {
-      setCameraError('Gagal memindai foto. Silakan ketik kode voucher secara manual.');
+      setCameraError(
+        'Kode QR / Barcode tidak terbaca di foto. Pastikan fokus & cahaya cukup, atau ketik manual.'
+      );
+      setStatusMsg('Silakan coba lagi atau ketik kode manual.');
+    } finally {
+      setDecodingPhoto(false);
     }
   };
 
   if (!open) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-xs">
-      <div className="w-full max-w-sm overflow-hidden rounded-2xl border border-brand-amber-soft bg-white shadow-2xl">
+    <div
+      className="fixed inset-0 z-[60] flex items-center justify-center bg-black/70 p-4 backdrop-blur-xs"
+      onClick={() => onCloseRef.current()}
+    >
+      <div
+        className="w-full max-w-sm overflow-hidden rounded-2xl border border-brand-amber-soft bg-white shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="flex items-center justify-between border-b border-brand-amber-soft px-4 py-3">
           <div className="flex items-center gap-2">
             <Camera className="h-4 w-4 text-brand-orange" />
@@ -138,25 +192,23 @@ export function VoucherScannerModal({ open, onClose, onDetected }: VoucherScanne
           </div>
           <button
             type="button"
-            onClick={onClose}
+            onClick={() => onCloseRef.current()}
             className="flex h-8 w-8 items-center justify-center rounded-lg text-brand-brown/70 hover:bg-brand-cream"
           >
             <X className="h-4 w-4" />
           </button>
         </div>
 
-        <div className="p-4 space-y-3">
-          {!cameraError ? (
-            <div className="relative aspect-[4/3] w-full overflow-hidden rounded-xl bg-black">
-              <video
-                ref={videoRef}
-                playsInline
-                muted
-                className="h-full w-full object-cover"
-              />
-              <div className="pointer-events-none absolute inset-6 rounded-xl border-2 border-dashed border-brand-orange/90" />
-            </div>
-          ) : (
+        <div className="space-y-3 p-4">
+          {/* Container always mounted so html5-qrcode can attach for live video OR scanFile */}
+          <div
+            id={readerId}
+            className={`w-full overflow-hidden rounded-xl bg-black ${
+              cameraError ? 'hidden' : 'min-h-[220px]'
+            }`}
+          />
+
+          {cameraError && (
             <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
               {cameraError}
             </div>
@@ -164,19 +216,22 @@ export function VoucherScannerModal({ open, onClose, onDetected }: VoucherScanne
 
           <p className="text-center text-xs font-medium text-brand-brown/75">{statusMsg}</p>
 
-          {detectorSupported && (
-            <label className="flex h-10 w-full cursor-pointer items-center justify-center gap-2 rounded-xl border border-brand-amber bg-brand-cream text-xs font-bold text-brand-brown hover:bg-brand-cream-deep">
-              <ImageIcon className="h-4 w-4 text-brand-orange" />
-              <span>Ambil Foto QR / Barcode</span>
-              <input
-                type="file"
-                accept="image/*"
-                capture="environment"
-                onChange={(e) => void handlePhotoCapture(e)}
-                className="hidden"
-              />
-            </label>
-          )}
+          <label
+            className={`flex h-10 w-full cursor-pointer items-center justify-center gap-2 rounded-xl border border-brand-amber bg-brand-cream text-xs font-bold text-brand-brown hover:bg-brand-cream-deep ${
+              decodingPhoto ? 'pointer-events-none opacity-60' : ''
+            }`}
+          >
+            <ImageIcon className="h-4 w-4 text-brand-orange" />
+            <span>{decodingPhoto ? 'Memindai Foto...' : 'Ambil Foto QR / Barcode'}</span>
+            <input
+              type="file"
+              accept="image/*"
+              capture="environment"
+              disabled={decodingPhoto}
+              onChange={(e) => void handlePhotoCapture(e)}
+              className="hidden"
+            />
+          </label>
         </div>
       </div>
     </div>
