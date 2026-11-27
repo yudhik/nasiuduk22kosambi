@@ -13,6 +13,7 @@ import type {
   MenuItem,
   OrderDetail,
   PerformanceAnalyticsResponse,
+  Promotion,
   ReceiptSettings,
   ResetStoreDayResponse,
   SalesChannel,
@@ -21,6 +22,7 @@ import type {
   StoreStatusResponse,
   UpdateMenuPayload,
   UpdateUserPayload,
+  UpsertPromotionPayload,
   UserSessionLog,
 } from '../types';
 
@@ -318,6 +320,38 @@ export const api = {
     request<ExpenseCategory>(`/api/expense-categories/${id}`, {
       method: 'PUT',
       body: JSON.stringify(payload),
+    }),
+
+  // Promotions
+  listPromotions: (activeOnly = false) =>
+    request<Promotion[]>(`/api/promotions?active_only=${activeOnly}`),
+
+  createPromotion: (payload: UpsertPromotionPayload) =>
+    request<Promotion>('/api/promotions', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  updatePromotion: (id: number, payload: UpsertPromotionPayload) =>
+    request<Promotion>(`/api/promotions/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }),
+
+  deletePromotion: (id: number) =>
+    request<{ deleted: boolean; soft_deleted: boolean; reason?: string }>(`/api/promotions/${id}`, {
+      method: 'DELETE',
+    }),
+
+  applyOrderPromo: (orderId: number, promoId: number) =>
+    request<OrderDetail>(`/api/orders/${orderId}/promo`, {
+      method: 'POST',
+      body: JSON.stringify({ promo_id: promoId }),
+    }),
+
+  removeOrderPromo: (orderId: number) =>
+    request<OrderDetail>(`/api/orders/${orderId}/promo`, {
+      method: 'DELETE',
     }),
 
   // Orders (Nota Digital)

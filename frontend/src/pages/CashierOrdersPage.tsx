@@ -7,9 +7,12 @@ import {
   CheckCircle2,
   Clock,
   Lock,
+  Percent,
   Printer,
   RefreshCw,
   Store,
+  Tag,
+  X,
   XCircle,
 } from 'lucide-react';
 import { api } from '../api/client';
@@ -19,6 +22,7 @@ import type {
   AuthUser,
   OrderDetail,
   OrderStatus,
+  Promotion,
   ReceiptSettings,
   SalesChannel,
   StoreStatusResponse,
@@ -76,6 +80,10 @@ export function CashierOrdersPage({
   const [voidTarget, setVoidTarget] = useState<OrderDetail | null>(null);
   const [voidReason, setVoidReason] = useState('');
 
+  // Promo picker modal
+  const [activePromos, setActivePromos] = useState<Promotion[]>([]);
+  const [promoTarget, setPromoTarget] = useState<OrderDetail | null>(null);
+
   // Thermal Bluetooth printer state
   const [printerMode, setPrinterMode] = useState<PrinterMode>(getSavedPrinterMode);
   const [btState, setBtState] = useState<BluetoothPrinterState>(getBluetoothPrinterState);
@@ -93,12 +101,14 @@ export function CashierOrdersPage({
     try {
       setLoading(true);
       setError(null);
-      const [orderData, channelData] = await Promise.all([
+      const [orderData, channelData, promoData] = await Promise.all([
         api.listOrders(date, 'ALL'),
         api.listChannels(false),
+        api.listPromotions(true).catch(() => [] as Promotion[]),
       ]);
       setOrders(orderData);
       setChannels(channelData);
+      setActivePromos(promoData);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Gagal memuat daftar nota');
     } finally {
@@ -184,6 +194,45 @@ export function CashierOrdersPage({
       onPrintPreview(order);
     } finally {
       setPrintingId(null);
+    }
+  };
+
+  const handleApplyPromo = async (order: OrderDetail, promo: Promotion) => {
+    try {
+      setBusyId(order.id);
+      setError(null);
+      const updated = await api.applyOrderPromo(order.id, promo.id);
+      setPromoTarget(null);
+      onOrdersChanged();
+      await loadOrders();
+      onToast(
+        `Promo "${promo.name}" diterapkan`,
+        `Diskon -${formatRupiah(updated.discount_amount)} • Total ${formatRupiah(updated.total_amount)}`,
+        'success'
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Gagal menerapkan promo';
+      setError(msg);
+      onToast('Gagal menerapkan promo', msg, 'error');
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const handleRemovePromo = async (order: OrderDetail) => {
+    try {
+      setBusyId(order.id);
+      setError(null);
+      await api.removeOrderPromo(order.id);
+      onOrdersChanged();
+      await loadOrders();
+      onToast('Promo dihapus dari nota', undefined, 'info');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Gagal menghapus promo';
+      setError(msg);
+      onToast('Gagal menghapus promo', msg, 'error');
+    } finally {
+      setBusyId(null);
     }
   };
 
@@ -523,6 +572,33 @@ export function CashierOrdersPage({
                     </p>
                   )}
 
+                  {order.promo_id !== null && (
+                    <div className="mt-2 flex items-center justify-between gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 text-[11px] text-emerald-800">
+                      <div className="min-w-0">
+                        <span className="font-bold">Promo: {order.promo_name}</span>
+                        <span className="ml-1.5 font-extrabold">
+                          (-{formatRupiah(order.discount_amount)})
+                        </span>
+                        <span className="block text-[10px] text-emerald-700/80">
+                          Subtotal {formatRupiah(order.subtotal_amount)} → Bayar{' '}
+                          {formatRupiah(order.total_amount)}
+                        </span>
+                      </div>
+                      {order.status === 'UNPAID' && !isTodayClosed && (
+                        <button
+                          type="button"
+                          disabled={busyId === order.id}
+                          onClick={() => void handleRemovePromo(order)}
+                          className="inline-flex h-7 items-center gap-1 rounded-lg border border-emerald-300 bg-white px-2 text-[10px] font-bold text-rose-700 hover:bg-rose-50"
+                          title="Hapus promo"
+                        >
+                          <X className="h-3 w-3" />
+                          <span>Hapus</span>
+                        </button>
+                      )}
+                    </div>
+                  )}
+
                   {order.void_reason && (
                     <p className="mt-2 rounded-lg bg-rose-50 px-2.5 py-1.5 text-[11px] text-rose-700">
                       <strong>Alasan Batal:</strong> {order.void_reason}
@@ -532,6 +608,17 @@ export function CashierOrdersPage({
 
                 {/* Action Footer */}
                 <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-brand-amber-soft/50 pt-3">
+                  {order.status === 'UNPAID' && !isTodayClosed && activePromos.length > 0 && (
+                    <button
+                      type="button"
+                      disabled={busyId === order.id}
+                      onClick={() => setPromoTarget(order)}
+                      className="inline-flex h-10 items-center justify-center gap-1.5 rounded-xl border border-brand-amber bg-brand-cream px-3 text-xs font-bold text-brand-brown hover:bg-brand-cream-deep disabled:opacity-60"
+                    >
+                      <Percent className="h-3.5 w-3.5 text-brand-orange" />
+                      <span>{order.promo_id ? 'Ganti Promo' : 'Promo'}</span>
+                    </button>
+                  )}
                   {order.status === 'UNPAID' && !isTodayClosed && (
                     <button
                       type="button"
@@ -574,6 +661,98 @@ export function CashierOrdersPage({
           })}
         </div>
       )}
+
+      {/* Promo Picker Modal */}
+      <BottomSheet
+        open={Boolean(promoTarget)}
+        title="Terapkan Promo pada Nota"
+        subtitle={
+          promoTarget
+            ? `${promoTarget.order_number} • Subtotal ${formatRupiah(promoTarget.subtotal_amount)}`
+            : ''
+        }
+        onClose={() => setPromoTarget(null)}
+        footer={
+          <button
+            type="button"
+            onClick={() => setPromoTarget(null)}
+            className="h-11 w-full rounded-xl border border-brand-amber-soft bg-white text-sm font-semibold text-brand-brown"
+          >
+            Tutup
+          </button>
+        }
+      >
+        <div className="space-y-2.5">
+          {activePromos.length === 0 ? (
+            <p className="py-4 text-center text-sm text-brand-brown/70">
+              Belum ada promo aktif.
+            </p>
+          ) : (
+            activePromos.map((p) => {
+              const subtotal = promoTarget?.subtotal_amount ?? 0;
+              const isApplied = promoTarget?.promo_id === p.id;
+              const exhausted = p.remaining_quota !== null && p.remaining_quota <= 0 && !isApplied;
+              const belowMin = subtotal < p.min_order_amount;
+              const wrongChannel =
+                p.regular_only &&
+                promoTarget !== null &&
+                promoTarget.channel_name.toLowerCase() !== 'regular';
+              const disabled = exhausted || belowMin || wrongChannel || busyId === promoTarget?.id;
+
+              const estDiscount =
+                p.discount_type === 'PERCENT'
+                  ? Math.min(
+                      subtotal,
+                      p.max_discount ?? subtotal,
+                      Math.floor((subtotal * p.discount_value) / 100)
+                    )
+                  : Math.min(subtotal, p.discount_value);
+
+              return (
+                <button
+                  key={p.id}
+                  type="button"
+                  disabled={disabled}
+                  onClick={() => promoTarget && void handleApplyPromo(promoTarget, p)}
+                  className={`flex w-full items-center justify-between gap-3 rounded-xl border p-3 text-left transition ${
+                    isApplied
+                      ? 'border-emerald-400 bg-emerald-50'
+                      : disabled
+                        ? 'cursor-not-allowed border-stone-200 bg-stone-50 opacity-60'
+                        : 'border-brand-amber-soft bg-white hover:border-brand-orange hover:bg-brand-cream/40'
+                  }`}
+                >
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <Tag className="h-3.5 w-3.5 text-brand-orange" />
+                      <span className="text-sm font-bold text-brand-brown">{p.name}</span>
+                      {p.remaining_quota !== null && (
+                        <span className="rounded-full bg-brand-cream-deep px-2 py-0.5 text-[10px] font-bold text-brand-brown">
+                          Sisa {p.remaining_quota}/{p.quota_limit}
+                        </span>
+                      )}
+                    </div>
+                    <p className="mt-0.5 text-[11px] text-brand-brown/70">
+                      {exhausted
+                        ? 'Kuota promo sudah habis'
+                        : wrongChannel
+                          ? 'Khusus saluran Regular'
+                          : belowMin
+                            ? `Minimal belanja ${formatRupiah(p.min_order_amount)}`
+                            : `Potongan -${formatRupiah(estDiscount)} → Total ${formatRupiah(subtotal - estDiscount)}`}
+                    </p>
+                  </div>
+                  <span className="shrink-0 rounded-lg bg-emerald-100 px-2.5 py-1 text-xs font-extrabold text-emerald-800">
+                    {p.discount_type === 'FIXED'
+                      ? `-${formatRupiah(p.discount_value)}`
+                      : `-${p.discount_value}%`}
+                  </span>
+                </button>
+              );
+            })
+          )}
+        </div>
+      </BottomSheet>
 
       {/* Post-Payment Print-or-Skip Prompt */}
       <BottomSheet

@@ -63,7 +63,16 @@ Aplikasi web POS & kontrol stok harian untuk **Nasi Uduk 22 Kosambi - Mpok Indri
 - **Kategori Pengeluaran Dinamis (`expense_categories`)**: Kategori dapat ditambah, diubah nama (otomatis memperbarui label pada catatan pengeluaran), dan dinonaktifkan tanpa menghapus histori.
 - **Grafik Perbandingan Persentase Kategori**: Visualisasi *stacked bar* dan rincian persentase per kategori pengeluaran beserta input nominal berpemisah ribuan.
 
-### 7. Laporan Harian & Analitik Performa
+### 7. Promo Berbasis Kuota & Promo Section Struk (QR / Barcode)
+- **Konfigurasi Promo (Pemilik & Admin di Menu & Stok → Promo):**
+  - Mendukung potongan **Nominal (`FIXED` Rp)** maupun **Persentase (`PERCENT` % + batas maksimal Rp)**, minimal belanja, rentang tanggal opsional, dan pembatasan saluran (`Khusus Regular` atau semua channel).
+  - **Kuota Pelanggan (`TOTAL` / `DAILY` / `UNLIMITED`)**: Contoh *"Promo 50 Pelanggan Pertama"* atau *"10 Pelanggan Pertama/Hari"* dengan validasi atomik di SQLite (kuota otomatis kembali jika promo dihapus atau nota dibatalkan/`VOIDED`).
+- **Promo Section Kondisional di Struk 58mm:**
+  - Setiap promo memiliki pengaturan **Promo Section** (teks kecil opsional + pilihan tunggal: **Tanpa Gambar**, **QR Code** ESC/POS `GS ( k`, atau **Barcode CODE128** ESC/POS `GS k`).
+  - **Hanya tercetak saat promo diterapkan pada nota**; nota tanpa promo berhenti di footer normal.
+- **Penerapan Kasir & Laporan:** Kasir menerapkan/menghapus promo pada nota `UNPAID` sebelum menekan **Tandai Lunas**; rekap total diskon & pemakaian promo tampil di **Laporan Harian**.
+
+### 8. Laporan Harian & Analitik Performa
 - **Laporan Harian**: Navigasi stepper tanggal (`<` / `>` / Hari Ini), rekap omzet lunas, belum bayar, void, pengeluaran, **Laba Bersih**, rekonsiliasi stok (awal/restock/terjual/selisih opname fisik), drill-down riwayat mutasi stok, serta **Export CSV**.
 - **Analitik Performa**: Filter rentang waktu (`Hari Ini`, `7 Hari`, `30 Hari`, `Bulan Ini`, `Custom`), proporsi saluran penjualan, grafik tren ganda (Pendapatan vs Pengeluaran), menu terlaris & terendah, variansi stok, jam sibuk, hari tersibuk, serta **interval pembuatan nota per user**.
 

@@ -10,8 +10,8 @@ use nota_digital_backend::{
     models::{
         AdminUserSummary, AuthUserResponse, DailyExpense, DailyReportResponse,
         ImportMenuCsvResponse, MenuItem, OrderDetail, PerformanceAnalyticsResponse,
-        ReceiptSettings, ResetStoreDayResponse, SalesChannel, StockItem, StoreStatusResponse,
-        UserSessionLog,
+        PromotionResponse, ReceiptSettings, ResetStoreDayResponse, SalesChannel, StockItem,
+        StoreStatusResponse, UserSessionLog,
     },
     AppState,
 };
@@ -1833,4 +1833,305 @@ async fn test_receipt_settings_admin_config_and_rbac() {
     let persisted: ReceiptSettings = serde_json::from_value(persisted_val).unwrap();
     assert_eq!(persisted.header_text, "Warung Mpok Indri");
     assert_eq!(persisted.footer_text, "");
+}
+
+#[tokio::test]
+async fn test_quota_promotions_and_receipt_promo_section() {
+    let (app, pool, admin_cookie) = setup_app().await;
+
+    // Create cashier to verify RBAC (cannot create promos, CAN list & apply/remove promos)
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/admin/users",
+        Some(&admin_cookie),
+        Some(json!({
+            "username": "kasir_promo_test",
+            "full_name": "Kasir Promo",
+            "role": "cashier",
+            "password": "CashierPassword123!"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (_, _, cashier_cookie) =
+        login_request(&app, "kasir_promo_test", "CashierPassword123!").await;
+    let cashier_cookie = cashier_cookie.unwrap();
+
+    // 1. Cashier cannot create a promo (403)
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/promotions",
+        Some(&cashier_cookie),
+        Some(json!({
+            "name": "Hack Promo",
+            "discount_type": "FIXED",
+            "discount_value": 5000
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // 2. Validation checks: invalid media value for QR/BARCODE, missing quota_limit for TOTAL
+    for bad in [
+        json!({ "name": "No QR", "discount_type": "FIXED", "discount_value": 5000, "receipt_media_type": "QR", "receipt_media_value": "" }),
+        json!({ "name": "Bad Barcode", "discount_type": "FIXED", "discount_value": 5000, "receipt_media_type": "BARCODE", "receipt_media_value": "NON-ASCII-\u{2603}" }),
+        json!({ "name": "No Quota", "discount_type": "FIXED", "discount_value": 5000, "quota_type": "TOTAL" }),
+        json!({ "name": "Bad Pct", "discount_type": "PERCENT", "discount_value": 101 }),
+    ] {
+        let (status, _, _) = send_json_with_cookie(
+            &app,
+            Method::POST,
+            "/api/promotions",
+            Some(&admin_cookie),
+            Some(bad),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    // 3. Create quota=1 FIXED promo with QR Promo Section + PERCENT promo with BARCODE
+    let (status, promo_val, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/promotions",
+        Some(&admin_cookie),
+        Some(json!({
+            "name": "Promo 1 Pelanggan Pertama",
+            "discount_type": "FIXED",
+            "discount_value": 5000,
+            "min_order_amount": 20000,
+            "quota_type": "TOTAL",
+            "quota_limit": 1,
+            "regular_only": true,
+            "receipt_promo_text": "Scan QR untuk ulasan jujur di Google Maps!",
+            "receipt_media_type": "QR",
+            "receipt_media_value": "https://g.page/r/test/review"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let promo: PromotionResponse = serde_json::from_value(promo_val).unwrap();
+    assert_eq!(promo.remaining_quota, Some(1));
+    assert_eq!(promo.receipt_media_type, "QR");
+
+    let (status, pct_val, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/promotions",
+        Some(&admin_cookie),
+        Some(json!({
+            "name": "Diskon 20% Maks 6rb",
+            "discount_type": "PERCENT",
+            "discount_value": 20,
+            "max_discount": 6000,
+            "min_order_amount": 0,
+            "quota_type": "DAILY",
+            "quota_limit": 5,
+            "regular_only": true,
+            "receipt_promo_text": "Simpan struk ini untuk kunjungan berikutnya",
+            "receipt_media_type": "BARCODE",
+            "receipt_media_value": "ND22-VOUCHER-01"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let pct_promo: PromotionResponse = serde_json::from_value(pct_val).unwrap();
+    assert_eq!(pct_promo.receipt_media_type, "BARCODE");
+
+    // 4. Open store & create 2 Regular UNPAID orders (order1=18k below min, order2=36k eligible, order3=40k)
+    let stk = create_stock(&app, &admin_cookie, "Nasi Uduk Promo", "porsi").await;
+    let (status, m_val, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/menus",
+        Some(&admin_cookie),
+        Some(json!({
+            "name": "Nasi Uduk Spesial",
+            "category": "Makanan",
+            "price": 18000,
+            "stock_requirements": [{ "stock_item_id": stk.id, "qty_per_unit": 1 }]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let menu: MenuItem = serde_json::from_value(m_val).unwrap();
+
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/store/open",
+        Some(&admin_cookie),
+        Some(json!({ "stocks": [{ "stock_item_id": stk.id, "initial_stock": 20 }] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (_, ch_val, _) =
+        send_json_with_cookie(&app, Method::GET, "/api/channels", Some(&cashier_cookie), None)
+            .await;
+    let channels: Vec<SalesChannel> = serde_json::from_value(ch_val).unwrap();
+    let regular_id = channels.iter().find(|c| c.code == "regular").unwrap().id;
+
+    let mut make_order = |qty: i64| {
+        let app = app.clone();
+        let cookie = cashier_cookie.clone();
+        async move {
+            let (st, val, _) = send_json_with_cookie(
+                &app,
+                Method::POST,
+                "/api/orders",
+                Some(&cookie),
+                Some(json!({
+                    "channel_id": regular_id,
+                    "items": [{ "menu_item_id": menu.id, "quantity": qty }]
+                })),
+            )
+            .await;
+            assert_eq!(st, StatusCode::CREATED);
+            serde_json::from_value::<OrderDetail>(val).unwrap()
+        }
+    };
+
+    let order_small = make_order(1).await; // 18.000
+    let order_a = make_order(2).await; // 36.000
+    let order_b = make_order(2).await; // 36.000
+
+    // Below min_order_amount rejected (400)
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        &format!("/api/orders/{}/promo", order_small.id),
+        Some(&cashier_cookie),
+        Some(json!({ "promo_id": promo.id })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Apply quota=1 promo to order_a -> discount 5.000, total 31.000, receipt QR snapshotted
+    let (status, applied_val, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        &format!("/api/orders/{}/promo", order_a.id),
+        Some(&cashier_cookie),
+        Some(json!({ "promo_id": promo.id })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let applied: OrderDetail = serde_json::from_value(applied_val).unwrap();
+    assert_eq!(applied.subtotal_amount, 36000);
+    assert_eq!(applied.discount_amount, 5000);
+    assert_eq!(applied.total_amount, 31000);
+    assert_eq!(applied.promo_id, Some(promo.id));
+    assert_eq!(applied.promo_receipt_media_type, "QR");
+    assert_eq!(applied.promo_receipt_media_value, "https://g.page/r/test/review");
+
+    // Applying same quota=1 promo to order_b must fail (409 Conflict: quota exhausted!)
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        &format!("/api/orders/{}/promo", order_b.id),
+        Some(&cashier_cookie),
+        Some(json!({ "promo_id": promo.id })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    // Removing promo from order_a frees quota so order_b can claim it
+    let (status, removed_val, _) = send_json_with_cookie(
+        &app,
+        Method::DELETE,
+        &format!("/api/orders/{}/promo", order_a.id),
+        Some(&cashier_cookie),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let removed: OrderDetail = serde_json::from_value(removed_val).unwrap();
+    assert_eq!(removed.discount_amount, 0);
+    assert_eq!(removed.total_amount, 36000);
+    assert_eq!(removed.promo_id, None);
+    assert_eq!(removed.promo_receipt_media_type, "NONE");
+
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        &format!("/api/orders/{}/promo", order_b.id),
+        Some(&cashier_cookie),
+        Some(json!({ "promo_id": promo.id })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Apply PERCENT promo (20% of 36.000 = 7.200 -> capped at max_discount 6.000 -> total 30.000) to order_a
+    let (status, pct_applied_val, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        &format!("/api/orders/{}/promo", order_a.id),
+        Some(&cashier_cookie),
+        Some(json!({ "promo_id": pct_promo.id })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let pct_applied: OrderDetail = serde_json::from_value(pct_applied_val).unwrap();
+    assert_eq!(pct_applied.discount_amount, 6000);
+    assert_eq!(pct_applied.total_amount, 30000);
+    assert_eq!(pct_applied.promo_receipt_media_type, "BARCODE");
+
+    // Pay both orders; once PAID, promo cannot be removed (409)
+    for oid in [order_a.id, order_b.id] {
+        let (st, _, _) = send_json_with_cookie(
+            &app,
+            Method::POST,
+            &format!("/api/orders/{oid}/pay"),
+            Some(&cashier_cookie),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+    }
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::DELETE,
+        &format!("/api/orders/{}/promo", order_a.id),
+        Some(&cashier_cookie),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    // Daily report reflects total_discounts = 5000 + 6000 = 11000 and paid_total = 31000 + 30000 = 61000
+    let (status, rep_val, _) = send_json_with_cookie(
+        &app,
+        Method::GET,
+        "/api/reports/daily",
+        Some(&admin_cookie),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let rep: DailyReportResponse = serde_json::from_value(rep_val).unwrap();
+    assert_eq!(rep.revenue.paid_total, 61000);
+    assert_eq!(rep.revenue.total_discounts, 11000);
+    assert_eq!(rep.promo_summary.len(), 2);
+
+    // Deleting a used promo soft-archives it instead of breaking FK
+    let (status, del_val, _) = send_json_with_cookie(
+        &app,
+        Method::DELETE,
+        &format!("/api/promotions/{}", promo.id),
+        Some(&admin_cookie),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(del_val["soft_deleted"], true);
+
+    // Ensure SQLite pool is still healthy
+    let (cnt,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM promotions")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(cnt, 2);
 }

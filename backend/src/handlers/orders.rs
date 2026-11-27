@@ -16,8 +16,8 @@ use crate::{
     },
     error::{AppError, AppResult},
     models::{
-        CreateOrderRequest, MenuItemRow, OrderDetail, OrderItemDetail, OrderRow, SalesChannel,
-        StockItem, VoidOrderRequest,
+        ApplyOrderPromoRequest, CreateOrderRequest, MenuItemRow, OrderDetail, OrderItemDetail,
+        OrderRow, PromotionRow, SalesChannel, StockItem, VoidOrderRequest,
     },
     AppState,
 };
@@ -244,9 +244,9 @@ pub async fn create_order(
         INSERT INTO orders (
             order_number, business_date, channel_id, channel_name_snapshot,
             customer_label, waiter_name, created_by_user_id, notes, status,
-            total_amount, created_at, paid_at
+            subtotal_amount, discount_amount, total_amount, created_at, paid_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
         "#,
     )
     .bind(&order_number)
@@ -258,6 +258,7 @@ pub async fn create_order(
     .bind(auth.id)
     .bind(&notes)
     .bind(initial_status)
+    .bind(total_amount)
     .bind(total_amount)
     .bind(&now)
     .bind(paid_at)
@@ -597,6 +598,245 @@ pub async fn pay_order(
             .await?;
 
     tx.commit().await?;
+    Ok(Json(OrderDetail::from_parts(updated, items)))
+}
+
+pub async fn apply_order_promo(
+    auth: AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(req): Json<ApplyOrderPromoRequest>,
+) -> AppResult<Json<OrderDetail>> {
+    auth.require_roles(&[Role::Cashier, Role::Owner, Role::Admin])?;
+    let mut tx = begin_write_tx(&state.pool).await?;
+
+    let order: OrderRow = sqlx::query_as("SELECT * FROM orders WHERE id = ?")
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("Nota #{id} tidak ditemukan")))?;
+
+    let day_status = get_store_day_status_tx(&mut tx, &order.business_date).await?;
+    if day_status == "CLOSED" {
+        return Err(AppError::Conflict(
+            "Toko untuk tanggal nota ini sudah ditutup.".into(),
+        ));
+    }
+    if order.status != "UNPAID" {
+        return Err(AppError::Conflict(
+            "Promo hanya dapat diterapkan pada nota yang BELUM BAYAR.".into(),
+        ));
+    }
+
+    let promo: PromotionRow = sqlx::query_as("SELECT * FROM promotions WHERE id = ?")
+        .bind(req.promo_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("Promo #{} tidak ditemukan", req.promo_id)))?;
+
+    if promo.is_active == 0 {
+        return Err(AppError::Conflict("Promo ini sudah tidak aktif.".into()));
+    }
+
+    if let Some(ref start) = promo.start_date {
+        if order.business_date.as_str() < start.as_str() {
+            return Err(AppError::Conflict(format!(
+                "Promo ini baru berlaku mulai tanggal {start}."
+            )));
+        }
+    }
+    if let Some(ref end) = promo.end_date {
+        if order.business_date.as_str() > end.as_str() {
+            return Err(AppError::Conflict(format!(
+                "Promo ini sudah berakhir pada tanggal {end}."
+            )));
+        }
+    }
+
+    if promo.regular_only != 0 {
+        let is_regular = if let Some(cid) = order.channel_id {
+            let code: Option<(String,)> =
+                sqlx::query_as("SELECT code FROM sales_channels WHERE id = ?")
+                    .bind(cid)
+                    .fetch_optional(&mut *tx)
+                    .await?;
+            code.map(|(c,)| c.eq_ignore_ascii_case("regular"))
+                .unwrap_or(false)
+        } else {
+            order.channel_name_snapshot.eq_ignore_ascii_case("regular")
+        };
+        if !is_regular {
+            return Err(AppError::Conflict(
+                "Promo ini hanya berlaku untuk saluran Regular (makan di tempat / bungkus)."
+                    .into(),
+            ));
+        }
+    }
+
+    if order.subtotal_amount < promo.min_order_amount {
+        return Err(AppError::Validation(format!(
+            "Minimal belanja untuk promo ini adalah Rp{}.",
+            promo.min_order_amount
+        )));
+    }
+
+    // Atomic quota enforcement (excluding VOIDED orders and excluding current order if re-applying)
+    match (promo.quota_type.as_str(), promo.quota_limit) {
+        ("TOTAL", Some(limit)) => {
+            let (used,): (i64,) = sqlx::query_as(
+                "SELECT COUNT(*) FROM orders WHERE promo_id = ? AND status != 'VOIDED' AND id != ?",
+            )
+            .bind(promo.id)
+            .bind(order.id)
+            .fetch_one(&mut *tx)
+            .await?;
+            if used >= limit {
+                return Err(AppError::Conflict(format!(
+                    "Kuota promo \"{}\" sudah habis ({used}/{limit}).",
+                    promo.name
+                )));
+            }
+        }
+        ("DAILY", Some(limit)) => {
+            let (used,): (i64,) = sqlx::query_as(
+                "SELECT COUNT(*) FROM orders WHERE promo_id = ? AND business_date = ? AND status != 'VOIDED' AND id != ?",
+            )
+            .bind(promo.id)
+            .bind(&order.business_date)
+            .bind(order.id)
+            .fetch_one(&mut *tx)
+            .await?;
+            if used >= limit {
+                return Err(AppError::Conflict(format!(
+                    "Kuota harian promo \"{}\" sudah habis ({used}/{limit}).",
+                    promo.name
+                )));
+            }
+        }
+        ("TOTAL" | "DAILY", None) => {
+            return Err(AppError::Conflict(
+                "Konfigurasi kuota promo tidak valid.".into(),
+            ));
+        }
+        _ => {}
+    }
+
+    let raw_discount = if promo.discount_type == "PERCENT" {
+        let pct_disc = ((order.subtotal_amount as i128) * (promo.discount_value as i128) / 100)
+            as i64;
+        match promo.max_discount {
+            Some(cap) => pct_disc.min(cap),
+            None => pct_disc,
+        }
+    } else {
+        promo.discount_value
+    };
+    let discount_amount = raw_discount.clamp(0, order.subtotal_amount.max(0));
+    let new_total = order.subtotal_amount - discount_amount;
+
+    sqlx::query(
+        r#"
+        UPDATE orders
+        SET discount_amount = ?,
+            total_amount = ?,
+            promo_id = ?,
+            promo_name_snapshot = ?,
+            promo_applied_by_username = ?,
+            promo_receipt_text_snapshot = ?,
+            promo_receipt_media_type = ?,
+            promo_receipt_media_value = ?
+        WHERE id = ?
+        "#,
+    )
+    .bind(discount_amount)
+    .bind(new_total)
+    .bind(promo.id)
+    .bind(&promo.name)
+    .bind(&auth.username)
+    .bind(&promo.receipt_promo_text)
+    .bind(&promo.receipt_media_type)
+    .bind(&promo.receipt_media_value)
+    .bind(order.id)
+    .execute(&mut *tx)
+    .await?;
+
+    let updated: OrderRow = sqlx::query_as("SELECT * FROM orders WHERE id = ?")
+        .bind(order.id)
+        .fetch_one(&mut *tx)
+        .await?;
+    let items: Vec<OrderItemDetail> =
+        sqlx::query_as("SELECT * FROM order_items WHERE order_id = ? ORDER BY id ASC")
+            .bind(order.id)
+            .fetch_all(&mut *tx)
+            .await?;
+
+    tx.commit().await?;
+    tracing::info!(
+        actor = %auth.username,
+        order_id = order.id,
+        promo_id = promo.id,
+        discount_amount,
+        "promo applied to order"
+    );
+    Ok(Json(OrderDetail::from_parts(updated, items)))
+}
+
+pub async fn remove_order_promo(
+    auth: AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> AppResult<Json<OrderDetail>> {
+    auth.require_roles(&[Role::Cashier, Role::Owner, Role::Admin])?;
+    let mut tx = begin_write_tx(&state.pool).await?;
+
+    let order: OrderRow = sqlx::query_as("SELECT * FROM orders WHERE id = ?")
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("Nota #{id} tidak ditemukan")))?;
+
+    let day_status = get_store_day_status_tx(&mut tx, &order.business_date).await?;
+    if day_status == "CLOSED" {
+        return Err(AppError::Conflict(
+            "Toko untuk tanggal nota ini sudah ditutup.".into(),
+        ));
+    }
+    if order.status != "UNPAID" {
+        return Err(AppError::Conflict(
+            "Promo hanya dapat dihapus pada nota yang BELUM BAYAR.".into(),
+        ));
+    }
+
+    sqlx::query(
+        r#"
+        UPDATE orders
+        SET discount_amount = 0,
+            total_amount = subtotal_amount,
+            promo_id = NULL,
+            promo_name_snapshot = '',
+            promo_applied_by_username = '',
+            promo_receipt_text_snapshot = '',
+            promo_receipt_media_type = 'NONE',
+            promo_receipt_media_value = ''
+        WHERE id = ?
+        "#,
+    )
+    .bind(order.id)
+    .execute(&mut *tx)
+    .await?;
+
+    let updated: OrderRow = sqlx::query_as("SELECT * FROM orders WHERE id = ?")
+        .bind(order.id)
+        .fetch_one(&mut *tx)
+        .await?;
+    let items: Vec<OrderItemDetail> =
+        sqlx::query_as("SELECT * FROM order_items WHERE order_id = ? ORDER BY id ASC")
+            .bind(order.id)
+            .fetch_all(&mut *tx)
+            .await?;
+
+    tx.commit().await?;
+    tracing::info!(actor = %auth.username, order_id = order.id, "promo removed from order");
     Ok(Json(OrderDetail::from_parts(updated, items)))
 }
 

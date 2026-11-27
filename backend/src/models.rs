@@ -288,6 +288,125 @@ pub struct UpdateExpenseCategoryRequest {
     pub is_active: bool,
 }
 
+// ===== Promotions =====
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct PromotionRow {
+    pub id: i64,
+    pub name: String,
+    pub discount_type: String,
+    pub discount_value: i64,
+    pub max_discount: Option<i64>,
+    pub min_order_amount: i64,
+    pub quota_type: String,
+    pub quota_limit: Option<i64>,
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+    pub regular_only: i64,
+    pub receipt_promo_text: String,
+    pub receipt_media_type: String,
+    pub receipt_media_value: String,
+    pub is_active: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromotionResponse {
+    pub id: i64,
+    pub name: String,
+    pub discount_type: String,
+    pub discount_value: i64,
+    pub max_discount: Option<i64>,
+    pub min_order_amount: i64,
+    pub quota_type: String,
+    pub quota_limit: Option<i64>,
+    pub used_total: i64,
+    pub used_today: i64,
+    pub remaining_quota: Option<i64>,
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+    pub regular_only: bool,
+    pub receipt_promo_text: String,
+    pub receipt_media_type: String,
+    pub receipt_media_value: String,
+    pub is_active: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl PromotionResponse {
+    pub fn from_row(row: PromotionRow, used_total: i64, used_today: i64) -> Self {
+        let remaining_quota = match (row.quota_type.as_str(), row.quota_limit) {
+            ("TOTAL", Some(limit)) => Some((limit - used_total).max(0)),
+            ("DAILY", Some(limit)) => Some((limit - used_today).max(0)),
+            _ => None,
+        };
+        Self {
+            id: row.id,
+            name: row.name,
+            discount_type: row.discount_type,
+            discount_value: row.discount_value,
+            max_discount: row.max_discount,
+            min_order_amount: row.min_order_amount,
+            quota_type: row.quota_type,
+            quota_limit: row.quota_limit,
+            used_total,
+            used_today,
+            remaining_quota,
+            start_date: row.start_date,
+            end_date: row.end_date,
+            regular_only: row.regular_only != 0,
+            receipt_promo_text: row.receipt_promo_text,
+            receipt_media_type: row.receipt_media_type,
+            receipt_media_value: row.receipt_media_value,
+            is_active: row.is_active != 0,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreatePromotionRequest {
+    pub name: String,
+    pub discount_type: String,
+    pub discount_value: i64,
+    pub max_discount: Option<i64>,
+    pub min_order_amount: Option<i64>,
+    pub quota_type: Option<String>,
+    pub quota_limit: Option<i64>,
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+    pub regular_only: Option<bool>,
+    pub receipt_promo_text: Option<String>,
+    pub receipt_media_type: Option<String>,
+    pub receipt_media_value: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdatePromotionRequest {
+    pub name: String,
+    pub discount_type: String,
+    pub discount_value: i64,
+    pub max_discount: Option<i64>,
+    pub min_order_amount: i64,
+    pub quota_type: String,
+    pub quota_limit: Option<i64>,
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+    pub regular_only: bool,
+    pub receipt_promo_text: String,
+    pub receipt_media_type: String,
+    pub receipt_media_value: String,
+    pub is_active: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ApplyOrderPromoRequest {
+    pub promo_id: i64,
+}
+
 // ===== Orders (Nota Digital) =====
 
 #[derive(Debug, Deserialize)]
@@ -334,7 +453,15 @@ pub struct OrderRow {
     pub created_by_user_id: Option<i64>,
     pub notes: String,
     pub status: String,
+    pub subtotal_amount: i64,
+    pub discount_amount: i64,
     pub total_amount: i64,
+    pub promo_id: Option<i64>,
+    pub promo_name_snapshot: String,
+    pub promo_applied_by_username: String,
+    pub promo_receipt_text_snapshot: String,
+    pub promo_receipt_media_type: String,
+    pub promo_receipt_media_value: String,
     pub created_at: String,
     pub paid_at: Option<String>,
     pub voided_at: Option<String>,
@@ -353,7 +480,15 @@ pub struct OrderDetail {
     pub created_by_user_id: Option<i64>,
     pub notes: String,
     pub status: String,
+    pub subtotal_amount: i64,
+    pub discount_amount: i64,
     pub total_amount: i64,
+    pub promo_id: Option<i64>,
+    pub promo_name: String,
+    pub promo_applied_by_username: String,
+    pub promo_receipt_text: String,
+    pub promo_receipt_media_type: String,
+    pub promo_receipt_media_value: String,
     pub created_at: String,
     pub paid_at: Option<String>,
     pub voided_at: Option<String>,
@@ -374,7 +509,15 @@ impl OrderDetail {
             created_by_user_id: order.created_by_user_id,
             notes: order.notes,
             status: order.status,
+            subtotal_amount: order.subtotal_amount,
+            discount_amount: order.discount_amount,
             total_amount: order.total_amount,
+            promo_id: order.promo_id,
+            promo_name: order.promo_name_snapshot,
+            promo_applied_by_username: order.promo_applied_by_username,
+            promo_receipt_text: order.promo_receipt_text_snapshot,
+            promo_receipt_media_type: order.promo_receipt_media_type,
+            promo_receipt_media_value: order.promo_receipt_media_value,
             created_at: order.created_at,
             paid_at: order.paid_at,
             voided_at: order.voided_at,
@@ -386,6 +529,13 @@ impl OrderDetail {
 
 // ===== Daily Report & Performance Analytics =====
 
+#[derive(Debug, Serialize, Deserialize, FromRow)]
+pub struct PromoUsageSummary {
+    pub promo_name: String,
+    pub order_count: i64,
+    pub total_discount: i64,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RevenueSummary {
     pub paid_total: i64,
@@ -395,6 +545,7 @@ pub struct RevenueSummary {
     pub voided_total: i64,
     pub voided_count: i64,
     pub total_portions_sold: i64,
+    pub total_discounts: i64,
     pub total_expenses: i64,
     pub net_profit: i64,
 }
@@ -443,6 +594,7 @@ pub struct DailyReportResponse {
     pub revenue: RevenueSummary,
     pub sales_by_channel: Vec<ChannelSalesSummary>,
     pub sales_by_menu: Vec<MenuSalesSummary>,
+    pub promo_summary: Vec<PromoUsageSummary>,
     pub expenses: Vec<DailyExpense>,
     pub stock_reconciliation: Vec<StockReconciliationRow>,
 }

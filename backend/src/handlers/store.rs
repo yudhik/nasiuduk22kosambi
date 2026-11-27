@@ -494,7 +494,15 @@ struct BackupOrderRow {
     waiter_name: String,
     notes: String,
     status: String,
+    subtotal_amount: i64,
+    discount_amount: i64,
     total_amount: i64,
+    promo_id: Option<i64>,
+    promo_name_snapshot: String,
+    promo_applied_by_username: String,
+    promo_receipt_text_snapshot: String,
+    promo_receipt_media_type: String,
+    promo_receipt_media_value: String,
     created_at: String,
     paid_at: Option<String>,
     voided_at: Option<String>,
@@ -712,7 +720,10 @@ pub async fn reset_store_day(
     let orders: Vec<BackupOrderRow> = sqlx::query_as(
         r#"
         SELECT id, order_number, business_date, customer_label, waiter_name, notes,
-               status, total_amount, created_at, paid_at, voided_at, void_reason,
+               status, subtotal_amount, discount_amount, total_amount,
+               promo_id, promo_name_snapshot, promo_applied_by_username,
+               promo_receipt_text_snapshot, promo_receipt_media_type, promo_receipt_media_value,
+               created_at, paid_at, voided_at, void_reason,
                channel_id, channel_name_snapshot, created_by_user_id
         FROM orders
         WHERE business_date = ?
@@ -870,7 +881,7 @@ pub async fn reset_store_day(
     for o in &orders {
         let _ = writeln!(
             sql,
-            "INSERT INTO orders (id, order_number, business_date, customer_label, waiter_name, notes, status, total_amount, created_at, paid_at, voided_at, void_reason, channel_id, channel_name_snapshot, created_by_user_id) VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {});",
+            "INSERT INTO orders (id, order_number, business_date, customer_label, waiter_name, notes, status, subtotal_amount, discount_amount, total_amount, promo_id, promo_name_snapshot, promo_applied_by_username, promo_receipt_text_snapshot, promo_receipt_media_type, promo_receipt_media_value, created_at, paid_at, voided_at, void_reason, channel_id, channel_name_snapshot, created_by_user_id) VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {});",
             o.id,
             sql_text(&o.order_number),
             sql_text(&o.business_date),
@@ -878,7 +889,15 @@ pub async fn reset_store_day(
             sql_text(&o.waiter_name),
             sql_text(&o.notes),
             sql_text(&o.status),
+            o.subtotal_amount,
+            o.discount_amount,
             o.total_amount,
+            sql_opt_i64(o.promo_id),
+            sql_text(&o.promo_name_snapshot),
+            sql_text(&o.promo_applied_by_username),
+            sql_text(&o.promo_receipt_text_snapshot),
+            sql_text(&o.promo_receipt_media_type),
+            sql_text(&o.promo_receipt_media_value),
             sql_text(&o.created_at),
             sql_opt_text(o.paid_at.as_deref()),
             sql_opt_text(o.voided_at.as_deref()),

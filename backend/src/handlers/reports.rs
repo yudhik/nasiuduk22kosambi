@@ -20,7 +20,8 @@ use crate::{
     models::{
         AnalyticsSummary, ChannelPerformanceStat, ChannelSalesSummary, DailyExpense,
         DailyPerformancePoint, DailyReportResponse, MenuSalesSummary, OrderRow, PeakHourStat,
-        PerformanceAnalyticsResponse, RevenueSummary, StockMovement, StockReconciliationRow,
+        PerformanceAnalyticsResponse, PromoUsageSummary, RevenueSummary, StockMovement,
+        StockReconciliationRow,
         StockVarianceSummary, StoreDayRow, UpdatePhysicalStockRequest, UserOrderIntervalStat,
         WeekdayStat,
     },
@@ -160,6 +161,29 @@ async fn build_daily_report_in_tx(
     .fetch_all(&mut **tx)
     .await?;
 
+    let (total_discounts,): (i64,) = sqlx::query_as(
+        "SELECT COALESCE(SUM(discount_amount), 0) FROM orders WHERE business_date = ? AND status = 'PAID'",
+    )
+    .bind(business_date)
+    .fetch_one(&mut **tx)
+    .await?;
+
+    let promo_summary: Vec<PromoUsageSummary> = sqlx::query_as(
+        r#"
+        SELECT
+            promo_name_snapshot AS promo_name,
+            COUNT(*) AS order_count,
+            COALESCE(SUM(discount_amount), 0) AS total_discount
+        FROM orders
+        WHERE business_date = ? AND status = 'PAID' AND promo_id IS NOT NULL
+        GROUP BY promo_name_snapshot
+        ORDER BY total_discount DESC, order_count DESC
+        "#,
+    )
+    .bind(business_date)
+    .fetch_all(&mut **tx)
+    .await?;
+
     let expenses: Vec<DailyExpense> = sqlx::query_as(
         "SELECT * FROM daily_expenses WHERE business_date = ? ORDER BY id DESC",
     )
@@ -257,11 +281,13 @@ async fn build_daily_report_in_tx(
             voided_total,
             voided_count,
             total_portions_sold,
+            total_discounts,
             total_expenses,
             net_profit,
         },
         sales_by_channel,
         sales_by_menu,
+        promo_summary,
         expenses,
         stock_reconciliation,
     })

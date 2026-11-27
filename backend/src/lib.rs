@@ -210,12 +210,28 @@ pub fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
             "/expense-categories/:id",
             put(handlers::expenses::update_expense_category),
         )
+        // Promotions (Quota-based discounts + receipt promo section)
+        .route(
+            "/promotions",
+            get(handlers::promotions::list_promotions)
+                .post(handlers::promotions::create_promotion),
+        )
+        .route(
+            "/promotions/:id",
+            put(handlers::promotions::update_promotion)
+                .delete(handlers::promotions::delete_promotion),
+        )
         // Orders (Nota Digital)
         .route(
             "/orders",
             get(handlers::orders::list_orders).post(handlers::orders::create_order),
         )
         .route("/orders/:id", get(handlers::orders::get_order))
+        .route(
+            "/orders/:id/promo",
+            post(handlers::orders::apply_order_promo)
+                .delete(handlers::orders::remove_order_promo),
+        )
         .route("/orders/:id/pay", post(handlers::orders::pay_order))
         .route("/orders/:id/void", post(handlers::orders::void_order))
         // Reports, Reconciliation & Performance Analytics

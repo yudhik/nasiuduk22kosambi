@@ -151,6 +151,50 @@ export interface OrderItemDetail {
 
 export type OrderStatus = 'UNPAID' | 'PAID' | 'VOIDED';
 
+export type PromoDiscountType = 'FIXED' | 'PERCENT';
+export type PromoQuotaType = 'UNLIMITED' | 'TOTAL' | 'DAILY';
+export type PromoReceiptMediaType = 'NONE' | 'QR' | 'BARCODE';
+
+export interface Promotion {
+  id: number;
+  name: string;
+  discount_type: PromoDiscountType;
+  discount_value: number;
+  max_discount: number | null;
+  min_order_amount: number;
+  quota_type: PromoQuotaType;
+  quota_limit: number | null;
+  used_total: number;
+  used_today: number;
+  remaining_quota: number | null;
+  start_date: string | null;
+  end_date: string | null;
+  regular_only: boolean;
+  receipt_promo_text: string;
+  receipt_media_type: PromoReceiptMediaType;
+  receipt_media_value: string;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface UpsertPromotionPayload {
+  name: string;
+  discount_type: PromoDiscountType;
+  discount_value: number;
+  max_discount?: number | null;
+  min_order_amount: number;
+  quota_type: PromoQuotaType;
+  quota_limit?: number | null;
+  start_date?: string | null;
+  end_date?: string | null;
+  regular_only: boolean;
+  receipt_promo_text: string;
+  receipt_media_type: PromoReceiptMediaType;
+  receipt_media_value: string;
+  is_active?: boolean;
+}
+
 export interface OrderDetail {
   id: number;
   order_number: string;
@@ -162,7 +206,15 @@ export interface OrderDetail {
   created_by_user_id: number | null;
   notes: string;
   status: OrderStatus;
+  subtotal_amount: number;
+  discount_amount: number;
   total_amount: number;
+  promo_id: number | null;
+  promo_name: string;
+  promo_applied_by_username: string;
+  promo_receipt_text: string;
+  promo_receipt_media_type: PromoReceiptMediaType;
+  promo_receipt_media_value: string;
   created_at: string;
   paid_at: string | null;
   voided_at: string | null;
@@ -181,6 +233,12 @@ export interface CreateOrderPayload {
   }>;
 }
 
+export interface PromoUsageSummary {
+  promo_name: string;
+  order_count: number;
+  total_discount: number;
+}
+
 export interface RevenueSummary {
   paid_total: number;
   paid_count: number;
@@ -189,6 +247,7 @@ export interface RevenueSummary {
   voided_total: number;
   voided_count: number;
   total_portions_sold: number;
+  total_discounts: number;
   total_expenses: number;
   net_profit: number;
 }
@@ -233,6 +292,7 @@ export interface DailyReportResponse {
   revenue: RevenueSummary;
   sales_by_channel: ChannelSalesSummary[];
   sales_by_menu: MenuSalesSummary[];
+  promo_summary: PromoUsageSummary[];
   expenses: DailyExpense[];
   stock_reconciliation: StockReconciliationRow[];
 }

@@ -9,6 +9,7 @@ import {
   Edit2,
   Layers,
   PackagePlus,
+  Percent,
   Plus,
   RotateCcw,
   Search,
@@ -20,6 +21,7 @@ import {
 } from 'lucide-react';
 import { api } from '../api/client';
 import { BottomSheet } from '../components/BottomSheet';
+import { PromotionsSection } from '../components/PromotionsSection';
 import type { ToastMessage } from '../components/ToastContainer';
 import type {
   ImportMenuCsvResponse,
@@ -44,7 +46,7 @@ interface MenuStockPageProps {
   onToast: (title: string, description?: string, tone?: ToastMessage['tone']) => void;
 }
 
-type SectionTab = 'menus' | 'stocks' | 'channels';
+type SectionTab = 'menus' | 'stocks' | 'channels' | 'promos';
 
 const SELF_STOCK_ID = -1;
 
@@ -718,6 +720,18 @@ export function MenuStockPage({
             <Tag className="h-3.5 w-3.5" />
             <span>Channel ({channels.length})</span>
           </button>
+          <button
+            type="button"
+            onClick={() => setSection('promos')}
+            className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-bold transition ${
+              section === 'promos'
+                ? 'bg-brand-orange text-white'
+                : 'text-brand-brown/75 hover:bg-brand-cream'
+            }`}
+          >
+            <Percent className="h-3.5 w-3.5" />
+            <span>Promo</span>
+          </button>
         </div>
 
         {/* Contextual CTA */}
@@ -1085,6 +1099,9 @@ export function MenuStockPage({
           ))}
         </div>
       )}
+
+      {/* SECTION 4: PROMOTIONS */}
+      {section === 'promos' && <PromotionsSection onToast={onToast} />}
 
       {/* MODAL: OPEN STORE & ENTER INITIAL STOCK */}
       <BottomSheet
