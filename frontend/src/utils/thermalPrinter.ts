@@ -1,5 +1,32 @@
-import { STORE_NAME, type OrderDetail } from '../types';
+import {
+  STORE_NAME,
+  type OrderDetail,
+  type ReceiptHeaderFontSize,
+  type ReceiptSettings,
+} from '../types';
 import { formatDateTime } from './format';
+
+export type ReceiptTextConfig = Pick<
+  ReceiptSettings,
+  'header_text' | 'footer_text' | 'header_bold' | 'header_font_size'
+>;
+
+function resolveHeaderEscPosStyle(size: ReceiptHeaderFontSize | undefined): {
+  gsSizeByte: number;
+  wrapWidth: number;
+} {
+  switch (size) {
+    case 'normal':
+      return { gsSizeByte: 0x00, wrapWidth: 32 };
+    case 'wide':
+      return { gsSizeByte: 0x10, wrapWidth: 16 };
+    case 'large':
+      return { gsSizeByte: 0x11, wrapWidth: 16 };
+    case 'tall':
+    default:
+      return { gsSizeByte: 0x01, wrapWidth: 32 };
+  }
+}
 
 export type PrinterMode = 'ble' | 'rawbt' | 'browser';
 
@@ -191,7 +218,10 @@ function wrapText(text: string, width = 32): string[] {
 /**
  * Builds raw ESC/POS bytes tuned for 58mm thermal printers (Iware X583: 48mm printable width = 32 chars/line).
  */
-export function buildEscPosReceipt58mm(order: OrderDetail): Uint8Array {
+export function buildEscPosReceipt58mm(
+  order: OrderDetail,
+  settings?: ReceiptTextConfig | null
+): Uint8Array {
   const WIDTH = 32;
   const divider = '-'.repeat(WIDTH);
   const encoder = new TextEncoder();
@@ -206,13 +236,39 @@ export function buildEscPosReceipt58mm(order: OrderDetail): Uint8Array {
   // ESC @ (Initialize printer)
   pushBytes(0x1b, 0x40);
 
-  // Center + Bold header
+  // Center + configurable Bold/Double-Strike + Font Size on header line 1, normal on extra lines
+  const headerLines = (settings?.header_text?.trim() || STORE_NAME)
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean);
+  const headerBold = settings?.header_bold ?? true;
+  const { gsSizeByte, wrapWidth } = resolveHeaderEscPosStyle(settings?.header_font_size);
   pushBytes(0x1b, 0x61, 0x01); // Center
-  pushBytes(0x1b, 0x45, 0x01); // Bold ON
-  for (const l of wrapText(STORE_NAME, WIDTH)) {
-    pushLine(l);
-  }
-  pushBytes(0x1b, 0x45, 0x00); // Bold OFF
+  headerLines.forEach((line, idx) => {
+    if (idx === 0) {
+      if (headerBold) {
+        pushBytes(0x1b, 0x45, 0x01); // Bold (Emphasized) ON
+        pushBytes(0x1b, 0x47, 0x01); // Double-strike ON for crisper bold on 58mm thermal
+      }
+      if (gsSizeByte !== 0x00) {
+        pushBytes(0x1d, 0x21, gsSizeByte); // Font size
+      }
+      for (const wrapped of wrapText(line, wrapWidth)) {
+        pushLine(wrapped);
+      }
+      if (gsSizeByte !== 0x00) {
+        pushBytes(0x1d, 0x21, 0x00); // Normal size
+      }
+      if (headerBold) {
+        pushBytes(0x1b, 0x47, 0x00); // Double-strike OFF
+        pushBytes(0x1b, 0x45, 0x00); // Bold OFF
+      }
+    } else {
+      for (const wrapped of wrapText(line, WIDTH)) {
+        pushLine(wrapped);
+      }
+    }
+  });
   pushLine(divider);
 
   // Left align metadata
@@ -276,14 +332,26 @@ export function buildEscPosReceipt58mm(order: OrderDetail): Uint8Array {
 
   pushLine(divider);
   pushBytes(0x1b, 0x61, 0x01); // Center
-  pushLine('Terima kasih!');
+  const footerText =
+    settings !== undefined && settings !== null
+      ? settings.footer_text.trim()
+      : 'Terima kasih atas kunjungan Anda!';
+  if (footerText) {
+    for (const rawLine of footerText.split('\n')) {
+      const trimmed = rawLine.trim();
+      if (!trimmed) continue;
+      for (const wrapped of wrapText(trimmed, WIDTH)) {
+        pushLine(wrapped);
+      }
+    }
+  }
   // Feed 4 lines for manual tear bar on Iware X583
   pushBytes(0x1b, 0x64, 0x04);
 
   return new Uint8Array(chunks);
 }
 
-export function buildEscPosTestPrint58mm(): Uint8Array {
+export function buildEscPosTestPrint58mm(settings?: ReceiptTextConfig | null): Uint8Array {
   const WIDTH = 32;
   const encoder = new TextEncoder();
   const chunks: number[] = [];
@@ -295,15 +363,51 @@ export function buildEscPosTestPrint58mm(): Uint8Array {
 
   pushBytes(0x1b, 0x40);
   pushBytes(0x1b, 0x61, 0x01);
-  pushBytes(0x1b, 0x45, 0x01);
-  for (const l of wrapText(STORE_NAME, WIDTH)) {
-    pushLine(l);
-  }
-  pushBytes(0x1b, 0x45, 0x00);
+  const headerLines = (settings?.header_text?.trim() || STORE_NAME)
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean);
+  const headerBold = settings?.header_bold ?? true;
+  const { gsSizeByte, wrapWidth } = resolveHeaderEscPosStyle(settings?.header_font_size);
+  headerLines.forEach((line, idx) => {
+    if (idx === 0) {
+      if (headerBold) {
+        pushBytes(0x1b, 0x45, 0x01);
+        pushBytes(0x1b, 0x47, 0x01);
+      }
+      if (gsSizeByte !== 0x00) {
+        pushBytes(0x1d, 0x21, gsSizeByte);
+      }
+      for (const wrapped of wrapText(line, wrapWidth)) {
+        pushLine(wrapped);
+      }
+      if (gsSizeByte !== 0x00) {
+        pushBytes(0x1d, 0x21, 0x00);
+      }
+      if (headerBold) {
+        pushBytes(0x1b, 0x47, 0x00);
+        pushBytes(0x1b, 0x45, 0x00);
+      }
+    } else {
+      for (const wrapped of wrapText(line, WIDTH)) {
+        pushLine(wrapped);
+      }
+    }
+  });
   pushLine('-'.repeat(WIDTH));
   pushLine('TEST PRINT 58MM BERHASIL');
   pushLine('Printer Bluetooth Siap Digunakan');
   pushLine('-'.repeat(WIDTH));
+  const footerText = settings?.footer_text?.trim();
+  if (footerText) {
+    for (const rawLine of footerText.split('\n')) {
+      const trimmed = rawLine.trim();
+      if (!trimmed) continue;
+      for (const wrapped of wrapText(trimmed, WIDTH)) {
+        pushLine(wrapped);
+      }
+    }
+  }
   pushBytes(0x1b, 0x64, 0x04);
   return new Uint8Array(chunks);
 }
@@ -345,12 +449,13 @@ function sendViaRawBt(bytes: Uint8Array): void {
 
 export async function printOrderSilently(
   order: OrderDetail,
-  mode: PrinterMode
+  mode: PrinterMode,
+  settings?: ReceiptTextConfig | null
 ): Promise<'printed' | 'fallback_browser'> {
   if (mode === 'browser') {
     return 'fallback_browser';
   }
-  const bytes = buildEscPosReceipt58mm(order);
+  const bytes = buildEscPosReceipt58mm(order, settings);
   if (mode === 'rawbt') {
     sendViaRawBt(bytes);
     return 'printed';
@@ -360,8 +465,11 @@ export async function printOrderSilently(
   return 'printed';
 }
 
-export async function runThermalTestPrint(mode: PrinterMode): Promise<void> {
-  const bytes = buildEscPosTestPrint58mm();
+export async function runThermalTestPrint(
+  mode: PrinterMode,
+  settings?: ReceiptTextConfig | null
+): Promise<void> {
+  const bytes = buildEscPosTestPrint58mm(settings);
   if (mode === 'rawbt') {
     sendViaRawBt(bytes);
     return;

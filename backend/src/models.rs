@@ -83,7 +83,10 @@ pub struct CreateMenuRequest {
     pub name: String,
     pub category: Option<String>,
     pub price: i64,
+    #[serde(default)]
     pub stock_requirements: Vec<MenuStockRequirementInput>,
+    #[serde(default)]
+    pub create_self_stock_qty: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -195,6 +198,43 @@ pub struct CloseStoreRequest {
     pub closing_notes: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResetStoreDayResponse {
+    pub backup_filename: String,
+    pub deleted_orders: i64,
+    pub deleted_snapshots: i64,
+    pub deleted_movements: i64,
+    pub store_status: StoreStatusResponse,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct ReceiptSettings {
+    pub header_text: String,
+    pub footer_text: String,
+    pub header_bold: bool,
+    pub header_font_size: String,
+    pub updated_at: String,
+    pub updated_by_username: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateReceiptSettingsRequest {
+    pub header_text: String,
+    pub footer_text: String,
+    #[serde(default = "default_header_bold")]
+    pub header_bold: bool,
+    #[serde(default = "default_header_font_size")]
+    pub header_font_size: String,
+}
+
+fn default_header_bold() -> bool {
+    true
+}
+
+fn default_header_font_size() -> String {
+    "tall".to_string()
+}
+
 // ===== Daily Expenses =====
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
@@ -217,6 +257,35 @@ pub struct CreateExpenseRequest {
     pub category: Option<String>,
     pub amount: i64,
     pub notes: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateExpenseRequest {
+    pub business_date: Option<String>,
+    pub title: String,
+    pub category: String,
+    pub amount: i64,
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct ExpenseCategory {
+    pub id: i64,
+    pub name: String,
+    pub is_active: i64,
+    pub sort_order: i64,
+    pub created_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateExpenseCategoryRequest {
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateExpenseCategoryRequest {
+    pub name: String,
+    pub is_active: bool,
 }
 
 // ===== Orders (Nota Digital) =====

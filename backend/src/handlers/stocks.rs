@@ -30,6 +30,8 @@ pub struct StockQuery {
 pub struct DeleteStockResponse {
     pub deleted: bool,
     pub soft_deleted: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 pub async fn list_stocks(
@@ -198,22 +200,36 @@ pub async fn delete_stock(
     auth.require_roles(&[Role::Owner, Role::Admin])?;
 
     let mut tx = begin_write_tx(&state.pool).await?;
-    let exists: Option<(i64,)> = sqlx::query_as("SELECT id FROM stock_items WHERE id = ?")
-        .bind(id)
-        .fetch_optional(&mut *tx)
-        .await?;
-    if exists.is_none() {
+    let existing: Option<(i64, i64)> =
+        sqlx::query_as("SELECT id, current_stock FROM stock_items WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let Some((_, current_stock)) = existing else {
         return Err(AppError::NotFound(format!("Item stok #{id} tidak ditemukan")));
+    };
+
+    if current_stock > 0 {
+        return Err(AppError::Conflict(
+            "Item stok masih memiliki sisa stok (> 0). Nolkan melalui 'Koreksi Awal' atau tutup toko terlebih dahulu sebelum menghapus."
+                .into(),
+        ));
     }
 
-    let menu_refs: (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM menu_stock_requirements WHERE stock_item_id = ?")
-            .bind(id)
-            .fetch_one(&mut *tx)
-            .await?;
-    if menu_refs.0 > 0 {
+    let active_menu_refs: (i64,) = sqlx::query_as(
+        r#"
+        SELECT COUNT(*)
+        FROM menu_stock_requirements msr
+        INNER JOIN menu_items m ON m.id = msr.menu_item_id
+        WHERE msr.stock_item_id = ? AND m.is_active = 1
+        "#,
+    )
+    .bind(id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if active_menu_refs.0 > 0 {
         return Err(AppError::Conflict(
-            "Item stok masih terhubung ke menu. Hapus keterkaitan dari menu terlebih dahulu."
+            "Item stok masih terhubung ke menu aktif. Ubah atau hapus menu terkait terlebih dahulu."
                 .into(),
         ));
     }
@@ -246,9 +262,17 @@ pub async fn delete_stock(
         return Ok(Json(DeleteStockResponse {
             deleted: true,
             soft_deleted: true,
+            reason: Some(
+                "Item stok memiliki riwayat mutasi/transaksi, sehingga diarsipkan agar laporan tetap akurat."
+                    .to_string(),
+            ),
         }));
     }
 
+    sqlx::query("DELETE FROM menu_stock_requirements WHERE stock_item_id = ?")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
     sqlx::query("DELETE FROM stock_items WHERE id = ?")
         .bind(id)
         .execute(&mut *tx)
@@ -258,6 +282,7 @@ pub async fn delete_stock(
     Ok(Json(DeleteStockResponse {
         deleted: true,
         soft_deleted: false,
+        reason: None,
     }))
 }
 

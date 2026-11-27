@@ -40,6 +40,7 @@ export interface CreateMenuPayload {
   category?: string;
   price: number;
   stock_requirements: MenuStockRequirementInput[];
+  create_self_stock_qty?: number;
 }
 
 export interface UpdateMenuPayload {
@@ -98,6 +99,25 @@ export interface StoreStatusResponse {
   closing_summary: StoreDaySummary | null;
 }
 
+export interface ResetStoreDayResponse {
+  backup_filename: string;
+  deleted_orders: number;
+  deleted_snapshots: number;
+  deleted_movements: number;
+  store_status: StoreStatusResponse;
+}
+
+export type ReceiptHeaderFontSize = 'normal' | 'tall' | 'wide' | 'large';
+
+export interface ReceiptSettings {
+  header_text: string;
+  footer_text: string;
+  header_bold: boolean;
+  header_font_size: ReceiptHeaderFontSize;
+  updated_at: string;
+  updated_by_username: string;
+}
+
 export interface DailyExpense {
   id: number;
   business_date: string;
@@ -107,6 +127,14 @@ export interface DailyExpense {
   notes: string;
   created_by_user_id: number | null;
   created_by_username: string;
+  created_at: string;
+}
+
+export interface ExpenseCategory {
+  id: number;
+  name: string;
+  is_active: number;
+  sort_order: number;
   created_at: string;
 }
 
@@ -295,7 +323,7 @@ export interface PerformanceAnalyticsResponse {
 
 export type UserRole = 'admin' | 'owner' | 'cashier' | 'waiter';
 
-export type TabKey = 'waiter' | 'cashier' | 'menu' | 'report' | 'users';
+export type TabKey = 'waiter' | 'cashier' | 'menu' | 'expenses' | 'report' | 'users';
 
 export interface AuthUser {
   id: number;

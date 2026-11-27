@@ -6,6 +6,7 @@ import {
   Package,
   Receipt,
   ShieldCheck,
+  Wallet,
 } from 'lucide-react';
 import { api, setUnauthorizedHandler } from './api/client';
 import { ReceiptPrintView } from './components/ReceiptPrintView';
@@ -13,6 +14,7 @@ import { ToastContainer, type ToastMessage } from './components/ToastContainer';
 import { AdminUsersPage, roleBadge } from './pages/AdminUsersPage';
 import { CashierOrdersPage } from './pages/CashierOrdersPage';
 import { DailyReportPage } from './pages/DailyReportPage';
+import { ExpensesPage } from './pages/ExpensesPage';
 import { LoginPage } from './pages/LoginPage';
 import { MenuStockPage } from './pages/MenuStockPage';
 import { WaiterOrderPage } from './pages/WaiterOrderPage';
@@ -20,6 +22,7 @@ import {
   STORE_NAME,
   type AuthUser,
   type OrderDetail,
+  type ReceiptSettings,
   type StoreStatusResponse,
   type TabKey,
 } from './types';
@@ -34,6 +37,7 @@ const ALL_NAV_ITEMS: Array<{
   { key: 'waiter', label: 'Catat Nota', shortLabel: 'Catat', icon: ClipboardEdit },
   { key: 'cashier', label: 'Kasir & Nota', shortLabel: 'Kasir', icon: Receipt },
   { key: 'menu', label: 'Menu & Stok', shortLabel: 'Stok', icon: Package },
+  { key: 'expenses', label: 'Pengeluaran', shortLabel: 'Biaya', icon: Wallet },
   { key: 'report', label: 'Laporan', shortLabel: 'Laporan', icon: BarChart3 },
   { key: 'users', label: 'Admin', shortLabel: 'Admin', icon: ShieldCheck },
 ];
@@ -48,6 +52,7 @@ export default function App() {
   const [refreshSignal, setRefreshSignal] = useState(0);
   const [unpaidCount, setUnpaidCount] = useState(0);
   const [storeStatus, setStoreStatus] = useState<StoreStatusResponse | null>(null);
+  const [receiptSettings, setReceiptSettings] = useState<ReceiptSettings | null>(null);
 
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const toastSeq = useRef(1);
@@ -80,6 +85,15 @@ export default function App() {
       setStoreStatus(st);
     } catch {
       // ignore silent status fetch errors
+    }
+  }, []);
+
+  const refreshReceiptSettings = useCallback(async () => {
+    try {
+      const cfg = await api.getReceiptSettings();
+      setReceiptSettings(cfg);
+    } catch {
+      // ignore silent receipt settings fetch errors
     }
   }, []);
 
@@ -132,6 +146,14 @@ export default function App() {
       // ignore silent badge refresh failures
     }
   }, [canSeeCashier]);
+
+  useEffect(() => {
+    if (user) {
+      void refreshReceiptSettings();
+    } else {
+      setReceiptSettings(null);
+    }
+  }, [user, refreshReceiptSettings]);
 
   useEffect(() => {
     if (user) {
@@ -195,13 +217,15 @@ export default function App() {
 
   const badge = roleBadge(user.role);
   const mobileGridClass =
-    visibleNavItems.length >= 5
-      ? 'grid-cols-5'
-      : visibleNavItems.length === 4
-        ? 'grid-cols-4'
-        : visibleNavItems.length === 3
-          ? 'grid-cols-3'
-          : 'grid-cols-2';
+    visibleNavItems.length >= 6
+      ? 'grid-cols-6'
+      : visibleNavItems.length === 5
+        ? 'grid-cols-5'
+        : visibleNavItems.length === 4
+          ? 'grid-cols-4'
+          : visibleNavItems.length === 3
+            ? 'grid-cols-3'
+            : 'grid-cols-2';
 
   const storePill =
     storeStatus?.status === 'OPEN'
@@ -322,6 +346,7 @@ export default function App() {
             <CashierOrdersPage
               currentUser={user}
               storeStatus={storeStatus}
+              receiptSettings={receiptSettings}
               onRefreshStoreStatus={refreshStoreStatus}
               onPrintPreview={setPrintOrder}
               refreshSignal={refreshSignal}
@@ -331,8 +356,15 @@ export default function App() {
           )}
           {activeTab === 'menu' && user.allowed_tabs.includes('menu') && (
             <MenuStockPage
+              currentUserRole={user.role}
               storeStatus={storeStatus}
               onStoreChanged={handleStoreChanged}
+              onToast={showToast}
+            />
+          )}
+          {activeTab === 'expenses' && user.allowed_tabs.includes('expenses') && (
+            <ExpensesPage
+              storeStatus={storeStatus}
               onToast={showToast}
             />
           )}
@@ -343,7 +375,11 @@ export default function App() {
             />
           )}
           {activeTab === 'users' && user.allowed_tabs.includes('users') && (
-            <AdminUsersPage currentUser={user} />
+            <AdminUsersPage
+              currentUser={user}
+              receiptSettings={receiptSettings}
+              onReceiptSettingsUpdated={setReceiptSettings}
+            />
           )}
         </main>
 
@@ -388,7 +424,11 @@ export default function App() {
       </div>
 
       {/* Printable Receipt Modal (Kasir Browser Fallback Preview) */}
-      <ReceiptPrintView order={printOrder} onClose={() => setPrintOrder(null)} />
+      <ReceiptPrintView
+        order={printOrder}
+        receiptSettings={receiptSettings}
+        onClose={() => setPrintOrder(null)}
+      />
     </>
   );
 }

@@ -8,10 +8,13 @@ import type {
   CreateUserPayload,
   DailyExpense,
   DailyReportResponse,
+  ExpenseCategory,
   ImportMenuCsvResponse,
   MenuItem,
   OrderDetail,
   PerformanceAnalyticsResponse,
+  ReceiptSettings,
+  ResetStoreDayResponse,
   SalesChannel,
   StockItem,
   StockMovement,
@@ -138,6 +141,20 @@ export const api = {
     return request<AuthEventLog[]>(`/api/admin/auth-events?${params.toString()}`);
   },
 
+  // Receipt Header / Footer Settings
+  getReceiptSettings: () => request<ReceiptSettings>('/api/receipt-settings'),
+
+  adminUpdateReceiptSettings: (payload: {
+    header_text: string;
+    footer_text: string;
+    header_bold: boolean;
+    header_font_size: ReceiptSettings['header_font_size'];
+  }) =>
+    request<ReceiptSettings>('/api/admin/receipt-settings', {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }),
+
   // Daily Store Open / Close Lifecycle
   getStoreStatus: () => request<StoreStatusResponse>('/api/store/status'),
 
@@ -160,6 +177,11 @@ export const api = {
       body: JSON.stringify(payload ?? {}),
     }),
 
+  resetStoreDay: () =>
+    request<ResetStoreDayResponse>('/api/store/reset-day', {
+      method: 'POST',
+    }),
+
   // Stock Items
   listStocks: (activeOnly = false) =>
     request<StockItem[]>(`/api/stocks?active_only=${activeOnly}`),
@@ -177,7 +199,7 @@ export const api = {
     }),
 
   deleteStock: (id: number) =>
-    request<{ deleted: boolean; soft_deleted: boolean }>(`/api/stocks/${id}`, {
+    request<{ deleted: boolean; soft_deleted: boolean; reason?: string }>(`/api/stocks/${id}`, {
       method: 'DELETE',
     }),
 
@@ -210,7 +232,7 @@ export const api = {
     }),
 
   deleteMenu: (id: number) =>
-    request<{ deleted: boolean; soft_deleted: boolean }>(`/api/menus/${id}`, {
+    request<{ deleted: boolean; soft_deleted: boolean; reason?: string }>(`/api/menus/${id}`, {
       method: 'DELETE',
     }),
 
@@ -260,6 +282,37 @@ export const api = {
   deleteExpense: (id: number) =>
     request<{ deleted: boolean }>(`/api/expenses/${id}`, {
       method: 'DELETE',
+    }),
+
+  updateExpense: (
+    id: number,
+    payload: {
+      business_date?: string;
+      title: string;
+      category: string;
+      amount: number;
+      notes?: string;
+    }
+  ) =>
+    request<DailyExpense>(`/api/expenses/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }),
+
+  // Expense Categories
+  listExpenseCategories: (activeOnly = false) =>
+    request<ExpenseCategory[]>(`/api/expense-categories?active_only=${activeOnly}`),
+
+  createExpenseCategory: (name: string) =>
+    request<ExpenseCategory>('/api/expense-categories', {
+      method: 'POST',
+      body: JSON.stringify({ name }),
+    }),
+
+  updateExpenseCategory: (id: number, payload: { name: string; is_active: boolean }) =>
+    request<ExpenseCategory>(`/api/expense-categories/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
     }),
 
   // Orders (Nota Digital)

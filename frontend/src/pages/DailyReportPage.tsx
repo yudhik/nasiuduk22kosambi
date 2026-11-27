@@ -1,27 +1,30 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   BarChart3,
+  ChevronLeft,
+  ChevronRight,
   Clock,
   Download,
   History,
   Lock,
-  Plus,
   RefreshCw,
+  RotateCcw,
   Save,
-  Trash2,
   TrendingUp,
-  Wallet,
 } from 'lucide-react';
 import { api } from '../api/client';
+import { BottomSheet } from '../components/BottomSheet';
 import type { ToastMessage } from '../components/ToastContainer';
 import type {
   AnalyticsPreset,
+  DailyExpense,
   DailyReportResponse,
+  OrderDetail,
   PerformanceAnalyticsResponse,
   StockMovement,
   StoreStatusResponse,
 } from '../types';
-import { formatRupiah, formatTime, todayLocalDate } from '../utils/format';
+import { formatRupiah, formatTime, formatTimestamp, todayLocalDate } from '../utils/format';
 
 interface DailyReportPageProps {
   storeStatus: StoreStatusResponse | null;
@@ -35,7 +38,78 @@ interface PhysicalDraft {
 
 type ReportTab = 'daily' | 'analytics';
 
-const EXPENSE_CATEGORIES = ['Bahan Baku', 'Gas / Listrik', 'Kemasan', 'Operasional', 'Lainnya'];
+type DrilldownTarget =
+  | {
+      kind: 'orders';
+      title: string;
+      subtitle: string;
+      orders: OrderDetail[];
+      emptyText: string;
+    }
+  | {
+      kind: 'expenses';
+      title: string;
+      subtitle: string;
+      expenses: DailyExpense[];
+    }
+  | {
+      kind: 'net_profit';
+      title: string;
+      subtitle: string;
+      paidTotal: number;
+      expensesTotal: number;
+      netProfit: number;
+      orders: OrderDetail[];
+      expenses: DailyExpense[];
+    }
+  | {
+      kind: 'menu';
+      title: string;
+      subtitle: string;
+      menuItemId: number;
+      menuName: string;
+      orders: OrderDetail[];
+    };
+
+function orderStatusBadge(status: OrderDetail['status']) {
+  switch (status) {
+    case 'PAID':
+      return { label: 'Lunas', cls: 'bg-emerald-100 text-emerald-700' };
+    case 'UNPAID':
+      return { label: 'Belum Bayar', cls: 'bg-amber-100 text-amber-700' };
+    case 'VOIDED':
+      return { label: 'Void', cls: 'bg-stone-200 text-stone-700' };
+  }
+}
+
+function parseNonNegativeInt(raw: string): number | null {
+  const trimmed = raw.trim();
+  if (trimmed === '') return null;
+  if (!/^\d+$/.test(trimmed)) return null;
+  const num = Number(trimmed);
+  return Number.isSafeInteger(num) && num >= 0 ? num : null;
+}
+
+function buildDraftsFromReport(rep: DailyReportResponse): Record<number, PhysicalDraft> {
+  const next: Record<number, PhysicalDraft> = {};
+  for (const row of rep.stock_reconciliation) {
+    next[row.stock_item_id] = {
+      physical: row.physical_stock === null ? '' : String(row.physical_stock),
+      notes: row.notes ?? '',
+    };
+  }
+  return next;
+}
+
+function shiftLocalDate(isoDate: string, deltaDays: number): string {
+  const parts = isoDate.split('-').map(Number);
+  if (parts.length !== 3 || parts.some((n) => Number.isNaN(n))) return todayLocalDate();
+  const d = new Date(parts[0], parts[1] - 1, parts[2] + deltaDays);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
 
 function formatDurationSeconds(secs: number | null): string {
   if (secs === null) return '—';
@@ -54,20 +128,17 @@ export function DailyReportPage({ storeStatus, onToast }: DailyReportPageProps) 
   // === Daily Report State ===
   const [date, setDate] = useState(todayLocalDate);
   const [report, setReport] = useState<DailyReportResponse | null>(null);
+  const [dailyOrders, setDailyOrders] = useState<OrderDetail[]>([]);
+  const [drilldown, setDrilldown] = useState<DrilldownTarget | null>(null);
   const [movements, setMovements] = useState<StockMovement[]>([]);
   const [showMovements, setShowMovements] = useState(false);
   const [drafts, setDrafts] = useState<Record<number, PhysicalDraft>>({});
   const [dirty, setDirty] = useState(false);
   const [loadingDaily, setLoadingDaily] = useState(true);
   const [savingOpname, setSavingOpname] = useState(false);
+  const [opnameError, setOpnameError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-
-  // Daily Expense Form
-  const [expTitle, setExpTitle] = useState('');
-  const [expCategory, setExpCategory] = useState('Bahan Baku');
-  const [expAmount, setExpAmount] = useState('');
-  const [expNotes, setExpNotes] = useState('');
-  const [savingExp, setSavingExp] = useState(false);
+  const dailyReqSeq = useRef(0);
 
   // === Performance Analytics State ===
   const [preset, setPreset] = useState<AnalyticsPreset>('7d');
@@ -75,35 +146,57 @@ export function DailyReportPage({ storeStatus, onToast }: DailyReportPageProps) 
   const [customTo, setCustomTo] = useState(todayLocalDate);
   const [analytics, setAnalytics] = useState<PerformanceAnalyticsResponse | null>(null);
   const [loadingAnalytics, setLoadingAnalytics] = useState(false);
+  const analyticsReqSeq = useRef(0);
+
+  const confirmDiscardDirty = useCallback(() => {
+    if (!dirty) return true;
+    return window.confirm('Ada perubahan opname stok yang belum disimpan. Buang perubahan?');
+  }, [dirty]);
+
+  const handleTabChange = (nextTab: ReportTab) => {
+    if (nextTab === tab) return;
+    if (tab === 'daily' && !confirmDiscardDirty()) return;
+    setDrilldown(null);
+    setError(null);
+    setTab(nextTab);
+  };
+
+  const handleDateChange = (nextDate: string) => {
+    if (!nextDate || nextDate === date) return;
+    if (!confirmDiscardDirty()) return;
+    setDrilldown(null);
+    setDate(nextDate);
+  };
 
   const loadDaily = useCallback(async () => {
+    const seq = ++dailyReqSeq.current;
     try {
       setLoadingDaily(true);
       setError(null);
-      const [rep, movs] = await Promise.all([
+      setOpnameError(null);
+      const [rep, movs, orders] = await Promise.all([
         api.getDailyReport(date),
         api.listStockMovements(date),
+        api.listOrders(date),
       ]);
+      if (seq !== dailyReqSeq.current) return;
       setReport(rep);
       setMovements(movs);
-
-      const initialDrafts: Record<number, PhysicalDraft> = {};
-      for (const row of rep.stock_reconciliation) {
-        initialDrafts[row.stock_item_id] = {
-          physical: row.physical_stock === null ? '' : String(row.physical_stock),
-          notes: row.notes ?? '',
-        };
-      }
-      setDrafts(initialDrafts);
+      setDailyOrders(orders);
+      setDrafts(buildDraftsFromReport(rep));
       setDirty(false);
     } catch (err) {
+      if (seq !== dailyReqSeq.current) return;
       setError(err instanceof Error ? err.message : 'Gagal memuat laporan harian');
     } finally {
-      setLoadingDaily(false);
+      if (seq === dailyReqSeq.current) {
+        setLoadingDaily(false);
+      }
     }
   }, [date]);
 
   const loadAnalytics = useCallback(async () => {
+    const seq = ++analyticsReqSeq.current;
     try {
       setLoadingAnalytics(true);
       setError(null);
@@ -112,11 +205,15 @@ export function DailyReportPage({ storeStatus, onToast }: DailyReportPageProps) 
         preset === 'custom' ? customFrom : undefined,
         preset === 'custom' ? customTo : undefined
       );
+      if (seq !== analyticsReqSeq.current) return;
       setAnalytics(data);
     } catch (err) {
+      if (seq !== analyticsReqSeq.current) return;
       setError(err instanceof Error ? err.message : 'Gagal memuat analitik performa');
     } finally {
-      setLoadingAnalytics(false);
+      if (seq === analyticsReqSeq.current) {
+        setLoadingAnalytics(false);
+      }
     }
   }, [preset, customFrom, customTo]);
 
@@ -130,67 +227,48 @@ export function DailyReportPage({ storeStatus, onToast }: DailyReportPageProps) 
 
   const isDayClosed = report?.store_status === 'CLOSED';
 
-  const handleAddExpense = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const amt = Number(expAmount);
-    if (!expTitle.trim() || Number.isNaN(amt) || amt <= 0) {
-      setError('Isi nama pengeluaran dan nominal lebih dari 0.');
-      return;
-    }
-    try {
-      setSavingExp(true);
-      setError(null);
-      await api.createExpense({
-        business_date: date,
-        title: expTitle.trim(),
-        category: expCategory,
-        amount: amt,
-        notes: expNotes.trim() || undefined,
-      });
-      setExpTitle('');
-      setExpAmount('');
-      setExpNotes('');
-      onToast('Pengeluaran tercatat', `${expTitle.trim()} • ${formatRupiah(amt)}`, 'success');
-      await loadDaily();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Gagal menambah pengeluaran');
-    } finally {
-      setSavingExp(false);
-    }
-  };
-
-  const handleDeleteExpense = async (id: number, title: string) => {
-    if (!window.confirm(`Hapus pengeluaran "${title}"?`)) return;
-    try {
-      setError(null);
-      await api.deleteExpense(id);
-      onToast(`Pengeluaran "${title}" dihapus`, undefined, 'info');
-      await loadDaily();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Gagal menghapus pengeluaran');
-    }
+  const handleResetOpname = () => {
+    if (!report) return;
+    setDrafts(buildDraftsFromReport(report));
+    setDirty(false);
+    setOpnameError(null);
   };
 
   const handleSavePhysicalStock = async () => {
     if (!report) return;
+    const invalidRow = report.stock_reconciliation.find((row) => {
+      const raw = drafts[row.stock_item_id]?.physical.trim() ?? '';
+      return raw !== '' && parseNonNegativeInt(raw) === null;
+    });
+    if (invalidRow) {
+      const msg = `Stok fisik untuk "${invalidRow.stock_name}" harus berupa angka bulat 0 atau lebih.`;
+      setOpnameError(msg);
+      onToast('Input opname tidak valid', msg, 'error');
+      return;
+    }
+
     try {
       setSavingOpname(true);
+      setOpnameError(null);
       setError(null);
       const entries = report.stock_reconciliation.map((row) => {
         const draft = drafts[row.stock_item_id];
         const raw = draft?.physical.trim() ?? '';
         return {
           stock_item_id: row.stock_item_id,
-          physical_stock: raw === '' ? null : Number(raw),
+          physical_stock: raw === '' ? null : parseNonNegativeInt(raw),
           notes: draft?.notes ?? '',
         };
       });
       const updated = await api.updatePhysicalStock(date, entries);
       setReport(updated);
+      setDrafts(buildDraftsFromReport(updated));
       setDirty(false);
       onToast('Opname stok fisik disimpan', undefined, 'success');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Gagal menyimpan opname stok');
+      const msg = err instanceof Error ? err.message : 'Gagal menyimpan opname stok';
+      setOpnameError(msg);
+      onToast('Gagal menyimpan opname', msg, 'error');
     } finally {
       setSavingOpname(false);
     }
@@ -222,14 +300,20 @@ export function DailyReportPage({ storeStatus, onToast }: DailyReportPageProps) 
     <div className="space-y-4">
       {/* Top Switcher */}
       <div className="flex flex-wrap items-center justify-between gap-2.5">
-        <div className="inline-flex rounded-xl border border-brand-amber-soft bg-white p-1">
+        <div
+          role="tablist"
+          aria-label="Jenis laporan"
+          className="inline-flex rounded-xl border border-brand-amber-soft bg-white p-1"
+        >
           <button
             type="button"
-            onClick={() => setTab('daily')}
-            className={`inline-flex items-center gap-1.5 rounded-lg px-3.5 py-1.5 text-xs font-bold transition ${
+            role="tab"
+            aria-selected={tab === 'daily'}
+            onClick={() => handleTabChange('daily')}
+            className={`inline-flex h-9 items-center gap-1.5 rounded-lg px-3.5 text-xs font-bold transition ${
               tab === 'daily'
-                ? 'bg-brand-orange text-white'
-                : 'text-brand-brown/75 hover:bg-brand-cream'
+                ? 'bg-brand-orange-dark text-white'
+                : 'text-brand-brown/80 hover:bg-brand-cream'
             }`}
           >
             <TrendingUp className="h-3.5 w-3.5" />
@@ -237,11 +321,13 @@ export function DailyReportPage({ storeStatus, onToast }: DailyReportPageProps) 
           </button>
           <button
             type="button"
-            onClick={() => setTab('analytics')}
-            className={`inline-flex items-center gap-1.5 rounded-lg px-3.5 py-1.5 text-xs font-bold transition ${
+            role="tab"
+            aria-selected={tab === 'analytics'}
+            onClick={() => handleTabChange('analytics')}
+            className={`inline-flex h-9 items-center gap-1.5 rounded-lg px-3.5 text-xs font-bold transition ${
               tab === 'analytics'
-                ? 'bg-brand-orange text-white'
-                : 'text-brand-brown/75 hover:bg-brand-cream'
+                ? 'bg-brand-orange-dark text-white'
+                : 'text-brand-brown/80 hover:bg-brand-cream'
             }`}
           >
             <BarChart3 className="h-3.5 w-3.5" />
@@ -251,23 +337,60 @@ export function DailyReportPage({ storeStatus, onToast }: DailyReportPageProps) 
 
         {tab === 'daily' && (
           <div className="flex flex-wrap items-center gap-2">
-            <input
-              type="date"
-              value={date}
-              onChange={(e) => setDate(e.target.value)}
-              className="h-10 rounded-xl border border-brand-amber-soft bg-white px-3 text-xs font-bold text-brand-brown focus:border-brand-orange focus:outline-none"
-            />
+            <div className="inline-flex items-center rounded-xl border border-brand-amber bg-white p-0.5">
+              <button
+                type="button"
+                aria-label="Hari sebelumnya"
+                title="Hari sebelumnya"
+                onClick={() => handleDateChange(shiftLocalDate(date, -1))}
+                className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-brand-brown transition hover:bg-brand-cream-deep focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-orange"
+              >
+                <ChevronLeft className="h-4 w-4" />
+              </button>
+              <input
+                type="date"
+                aria-label="Tanggal laporan harian"
+                value={date}
+                onChange={(e) => handleDateChange(e.target.value)}
+                className="h-9 bg-transparent px-2 text-xs font-bold tabular-nums text-brand-brown focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-orange"
+              />
+              <button
+                type="button"
+                aria-label="Hari berikutnya"
+                title="Hari berikutnya"
+                disabled={date >= todayLocalDate()}
+                onClick={() => handleDateChange(shiftLocalDate(date, 1))}
+                className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-brand-brown transition hover:bg-brand-cream-deep focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-orange disabled:cursor-not-allowed disabled:opacity-35"
+              >
+                <ChevronRight className="h-4 w-4" />
+              </button>
+            </div>
+            {date !== todayLocalDate() && (
+              <button
+                type="button"
+                onClick={() => handleDateChange(todayLocalDate())}
+                className="inline-flex h-10 items-center rounded-xl border border-brand-amber bg-brand-cream px-3 text-xs font-bold text-brand-brown hover:bg-brand-cream-deep focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-orange"
+              >
+                Hari Ini
+              </button>
+            )}
             <button
               type="button"
-              onClick={() => void loadDaily()}
-              className="inline-flex h-10 items-center gap-1.5 rounded-xl border border-brand-amber-soft bg-white px-3 text-xs font-bold text-brand-brown hover:bg-brand-cream-deep"
+              aria-label="Muat ulang laporan harian"
+              title="Muat ulang"
+              onClick={() => {
+                if (!confirmDiscardDirty()) return;
+                setDrilldown(null);
+                void loadDaily();
+              }}
+              className="inline-flex h-10 items-center gap-1.5 rounded-xl border border-brand-amber bg-white px-3 text-xs font-bold text-brand-brown hover:bg-brand-cream-deep focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-orange"
             >
               <RefreshCw className={`h-4 w-4 ${loadingDaily ? 'animate-spin' : ''}`} />
             </button>
             <a
               href={api.getCsvExportUrl(date)}
               download={`laporan-${date}.csv`}
-              className="inline-flex h-10 items-center gap-1.5 rounded-xl bg-brand-brown px-3.5 text-xs font-bold text-brand-cream hover:bg-brand-brown-dark"
+              className="inline-flex h-10 items-center gap-1.5 rounded-xl bg-brand-brown px-3.5 text-xs font-bold text-brand-cream hover:bg-brand-brown-dark focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-orange"
             >
               <Download className="h-4 w-4" />
               <span>Export CSV</span>
@@ -277,41 +400,117 @@ export function DailyReportPage({ storeStatus, onToast }: DailyReportPageProps) 
       </div>
 
       {error && (
-        <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-medium text-rose-700">
-          {error}
+        <div
+          role="alert"
+          className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-medium text-rose-700"
+        >
+          <span>{error}</span>
+          <button
+            type="button"
+            onClick={() => void (tab === 'daily' ? loadDaily() : loadAnalytics())}
+            className="inline-flex h-8 items-center gap-1 rounded-lg border border-rose-300 bg-white px-2.5 text-xs font-bold text-rose-700 hover:bg-rose-100"
+          >
+            <RefreshCw className="h-3.5 w-3.5" />
+            <span>Coba Lagi</span>
+          </button>
         </div>
       )}
 
       {/* ==================== TAB 1: DAILY REPORT ==================== */}
       {tab === 'daily' &&
-        (loadingDaily || !report ? (
-          <div className="rounded-2xl border border-brand-amber-soft bg-white p-10 text-center text-sm text-brand-brown/60">
+        (loadingDaily && !report ? (
+          <div className="rounded-2xl border border-brand-amber-soft bg-white p-10 text-center text-sm text-brand-brown/75">
             Memuat laporan harian...
+          </div>
+        ) : !report ? (
+          <div className="rounded-2xl border border-rose-200 bg-white p-8 text-center">
+            <p className="text-sm font-bold text-brand-brown">
+              Laporan harian untuk tanggal {date} gagal dimuat.
+            </p>
+            <button
+              type="button"
+              onClick={() => void loadDaily()}
+              className="mt-3 inline-flex h-10 items-center gap-1.5 rounded-xl bg-brand-orange-dark px-4 text-xs font-bold text-white hover:bg-brand-brown"
+            >
+              <RefreshCw className="h-4 w-4" />
+              <span>Muat Ulang</span>
+            </button>
           </div>
         ) : (
           <div className="space-y-4">
             {/* Revenue, Expenses & Net Profit KPI Cards */}
             <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
-              <div className="rounded-2xl border border-emerald-200 bg-white p-4 shadow-sm">
-                <p className="text-xs font-semibold text-brand-brown/65">Pendapatan Lunas</p>
+              <button
+                type="button"
+                onClick={() => {
+                  const paidOrders = dailyOrders.filter((o) => o.status === 'PAID');
+                  setDrilldown({
+                    kind: 'orders',
+                    title: 'Detail Pendapatan Lunas',
+                    subtitle: `${report.business_date} • ${paidOrders.length} nota • ${formatRupiah(report.revenue.paid_total)}`,
+                    orders: paidOrders,
+                    emptyText: 'Belum ada nota lunas pada tanggal ini.',
+                  });
+                }}
+                className="group rounded-2xl border border-emerald-200 bg-white p-4 text-left shadow-sm transition hover:border-emerald-400 hover:shadow-md active:scale-[0.99]"
+              >
+                <div className="flex items-center justify-between gap-1">
+                  <p className="text-xs font-semibold text-brand-brown/65">Pendapatan Lunas</p>
+                  <ChevronRight className="h-3.5 w-3.5 text-emerald-600/60 transition group-hover:translate-x-0.5" />
+                </div>
                 <p className="mt-1 text-lg font-extrabold text-emerald-700 sm:text-xl">
                   {formatRupiah(report.revenue.paid_total)}
                 </p>
                 <p className="mt-0.5 text-[11px] text-brand-brown/60">
                   {report.revenue.paid_count} nota • {report.revenue.total_portions_sold} porsi
                 </p>
-              </div>
-              <div className="rounded-2xl border border-rose-200 bg-white p-4 shadow-sm">
-                <p className="text-xs font-semibold text-brand-brown/65">Pengeluaran Harian</p>
+              </button>
+
+              <button
+                type="button"
+                onClick={() =>
+                  setDrilldown({
+                    kind: 'expenses',
+                    title: 'Detail Pengeluaran Harian',
+                    subtitle: `${report.business_date} • ${report.expenses.length} catatan • ${formatRupiah(report.revenue.total_expenses)}`,
+                    expenses: report.expenses,
+                  })
+                }
+                className="group rounded-2xl border border-rose-200 bg-white p-4 text-left shadow-sm transition hover:border-rose-400 hover:shadow-md active:scale-[0.99]"
+              >
+                <div className="flex items-center justify-between gap-1">
+                  <p className="text-xs font-semibold text-brand-brown/65">Pengeluaran Harian</p>
+                  <ChevronRight className="h-3.5 w-3.5 text-rose-600/60 transition group-hover:translate-x-0.5" />
+                </div>
                 <p className="mt-1 text-lg font-extrabold text-rose-700 sm:text-xl">
                   {formatRupiah(report.revenue.total_expenses)}
                 </p>
                 <p className="mt-0.5 text-[11px] text-brand-brown/60">
                   {report.expenses.length} catatan biaya
                 </p>
-              </div>
-              <div className="rounded-2xl border border-brand-orange/40 bg-brand-cream-deep/60 p-4 shadow-sm">
-                <p className="text-xs font-bold text-brand-brown">Laba Bersih</p>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  const paidOrders = dailyOrders.filter((o) => o.status === 'PAID');
+                  setDrilldown({
+                    kind: 'net_profit',
+                    title: 'Detail Laba Bersih',
+                    subtitle: `${report.business_date} • Lunas ${formatRupiah(report.revenue.paid_total)} − Biaya ${formatRupiah(report.revenue.total_expenses)}`,
+                    paidTotal: report.revenue.paid_total,
+                    expensesTotal: report.revenue.total_expenses,
+                    netProfit: report.revenue.net_profit,
+                    orders: paidOrders,
+                    expenses: report.expenses,
+                  });
+                }}
+                className="group rounded-2xl border border-brand-orange/40 bg-brand-cream-deep/60 p-4 text-left shadow-sm transition hover:border-brand-orange hover:shadow-md active:scale-[0.99]"
+              >
+                <div className="flex items-center justify-between gap-1">
+                  <p className="text-xs font-bold text-brand-brown">Laba Bersih</p>
+                  <ChevronRight className="h-3.5 w-3.5 text-brand-brown/60 transition group-hover:translate-x-0.5" />
+                </div>
                 <p
                   className={`mt-1 text-lg font-extrabold sm:text-xl ${
                     report.revenue.net_profit >= 0 ? 'text-brand-brown' : 'text-rose-700'
@@ -320,47 +519,98 @@ export function DailyReportPage({ storeStatus, onToast }: DailyReportPageProps) 
                   {formatRupiah(report.revenue.net_profit)}
                 </p>
                 <p className="mt-0.5 text-[11px] text-brand-brown/65">Lunas − Pengeluaran</p>
-              </div>
-              <div className="rounded-2xl border border-brand-amber-soft bg-white p-4 shadow-sm">
-                <p className="text-xs font-semibold text-brand-brown/65">Belum Bayar</p>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  const unpaidOrders = dailyOrders.filter((o) => o.status === 'UNPAID');
+                  setDrilldown({
+                    kind: 'orders',
+                    title: 'Detail Nota Belum Bayar',
+                    subtitle: `${report.business_date} • ${unpaidOrders.length} nota • ${formatRupiah(report.revenue.unpaid_total)}`,
+                    orders: unpaidOrders,
+                    emptyText: 'Tidak ada nota belum bayar pada tanggal ini.',
+                  });
+                }}
+                className="group rounded-2xl border border-brand-amber-soft bg-white p-4 text-left shadow-sm transition hover:border-amber-400 hover:shadow-md active:scale-[0.99]"
+              >
+                <div className="flex items-center justify-between gap-1">
+                  <p className="text-xs font-semibold text-brand-brown/65">Belum Bayar</p>
+                  <ChevronRight className="h-3.5 w-3.5 text-amber-600/60 transition group-hover:translate-x-0.5" />
+                </div>
                 <p className="mt-1 text-lg font-extrabold text-amber-700 sm:text-xl">
                   {formatRupiah(report.revenue.unpaid_total)}
                 </p>
                 <p className="mt-0.5 text-[11px] text-brand-brown/60">
                   {report.revenue.unpaid_count} nota
                 </p>
-              </div>
-              <div className="col-span-2 rounded-2xl border border-brand-amber-soft bg-white p-4 shadow-sm lg:col-span-1">
-                <p className="text-xs font-semibold text-brand-brown/65">Dibatalkan (Void)</p>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  const voidedOrders = dailyOrders.filter((o) => o.status === 'VOIDED');
+                  setDrilldown({
+                    kind: 'orders',
+                    title: 'Detail Nota Dibatalkan (Void)',
+                    subtitle: `${report.business_date} • ${voidedOrders.length} nota • ${formatRupiah(report.revenue.voided_total)}`,
+                    orders: voidedOrders,
+                    emptyText: 'Tidak ada nota dibatalkan pada tanggal ini.',
+                  });
+                }}
+                className="group col-span-2 rounded-2xl border border-brand-amber-soft bg-white p-4 text-left shadow-sm transition hover:border-stone-400 hover:shadow-md active:scale-[0.99] lg:col-span-1"
+              >
+                <div className="flex items-center justify-between gap-1">
+                  <p className="text-xs font-semibold text-brand-brown/65">Dibatalkan (Void)</p>
+                  <ChevronRight className="h-3.5 w-3.5 text-stone-500/70 transition group-hover:translate-x-0.5" />
+                </div>
                 <p className="mt-1 text-lg font-extrabold text-stone-600 sm:text-xl">
                   {formatRupiah(report.revenue.voided_total)}
                 </p>
                 <p className="mt-0.5 text-[11px] text-brand-brown/60">
                   {report.revenue.voided_count} nota
                 </p>
-              </div>
+              </button>
             </div>
 
             {/* Sales Grouped by Channel */}
             <div className="rounded-2xl border border-brand-amber-soft bg-white p-4 shadow-sm">
-              <h3 className="text-sm font-extrabold text-brand-brown">
-                Total Penjualan per Channel ({report.business_date})
-              </h3>
+              <div className="flex items-center justify-between gap-2">
+                <h3 className="text-sm font-extrabold text-brand-brown">
+                  Total Penjualan per Channel ({report.business_date})
+                </h3>
+                <span className="text-[11px] text-brand-brown/55">Klik untuk lihat transaksi</span>
+              </div>
               {report.sales_by_channel.length === 0 ? (
                 <p className="mt-2 text-xs text-brand-brown/60">Belum ada penjualan pada tanggal ini.</p>
               ) : (
                 <div className="mt-3 grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-4">
                   {report.sales_by_channel.map((ch) => (
-                    <div
+                    <button
                       key={ch.channel_name}
-                      className="rounded-xl border border-brand-amber-soft bg-brand-cream/60 p-3"
+                      type="button"
+                      onClick={() => {
+                        const channelOrders = dailyOrders.filter(
+                          (o) => o.status !== 'VOIDED' && o.channel_name === ch.channel_name
+                        );
+                        setDrilldown({
+                          kind: 'orders',
+                          title: `Transaksi Channel ${ch.channel_name}`,
+                          subtitle: `${report.business_date} • ${channelOrders.length} nota • ${formatRupiah(ch.total_revenue)}`,
+                          orders: channelOrders,
+                          emptyText: `Tidak ada transaksi aktif untuk channel ${ch.channel_name}.`,
+                        });
+                      }}
+                      className="group rounded-xl border border-brand-amber-soft bg-brand-cream/60 p-3 text-left transition hover:border-brand-orange hover:bg-brand-cream active:scale-[0.99]"
                     >
                       <div className="flex items-center justify-between">
                         <span className="text-xs font-extrabold text-brand-brown">
                           {ch.channel_name}
                         </span>
-                        <span className="rounded-full bg-white px-2 py-0.5 text-[11px] font-bold text-brand-brown/80">
+                        <span className="inline-flex items-center gap-0.5 rounded-full bg-white px-2 py-0.5 text-[11px] font-bold text-brand-brown/80">
                           {ch.order_count} nota
+                          <ChevronRight className="h-3 w-3 text-brand-orange/70 transition group-hover:translate-x-0.5" />
                         </span>
                       </div>
                       <p className="mt-1.5 text-base font-extrabold text-brand-orange">
@@ -370,110 +620,7 @@ export function DailyReportPage({ storeStatus, onToast }: DailyReportPageProps) 
                         Lunas: {formatRupiah(ch.paid_revenue)}
                         {ch.unpaid_count > 0 ? ` • Belum: ${ch.unpaid_count}` : ''}
                       </p>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            {/* Daily Expenses Recording & List */}
-            <div className="rounded-2xl border border-brand-amber-soft bg-white p-4 shadow-sm">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div className="flex items-center gap-2">
-                  <Wallet className="h-4 w-4 text-brand-orange" />
-                  <h3 className="text-sm font-extrabold text-brand-brown">
-                    Pengeluaran Harian ({formatRupiah(report.revenue.total_expenses)})
-                  </h3>
-                </div>
-                {isDayClosed && (
-                  <span className="inline-flex items-center gap-1 rounded-full bg-rose-100 px-2.5 py-0.5 text-[11px] font-bold text-rose-700">
-                    <Lock className="h-3 w-3" />
-                    Terkunci (Toko Sudah Tutup)
-                  </span>
-                )}
-              </div>
-
-              {!isDayClosed && (
-                <form
-                  onSubmit={handleAddExpense}
-                  className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-12"
-                >
-                  <input
-                    type="text"
-                    value={expTitle}
-                    onChange={(e) => setExpTitle(e.target.value)}
-                    placeholder="Keterangan (cth: Beli ayam 5kg / Gas 3kg)"
-                    className="h-10 rounded-xl border border-brand-amber-soft px-3 text-xs text-brand-brown focus:border-brand-orange focus:outline-none sm:col-span-4"
-                  />
-                  <select
-                    value={expCategory}
-                    onChange={(e) => setExpCategory(e.target.value)}
-                    className="h-10 rounded-xl border border-brand-amber-soft bg-white px-2.5 text-xs font-semibold text-brand-brown sm:col-span-2"
-                  >
-                    {EXPENSE_CATEGORIES.map((c) => (
-                      <option key={c} value={c}>
-                        {c}
-                      </option>
-                    ))}
-                  </select>
-                  <input
-                    type="number"
-                    min={1}
-                    value={expAmount}
-                    onChange={(e) => setExpAmount(e.target.value)}
-                    placeholder="Nominal (Rp)"
-                    className="h-10 rounded-xl border border-brand-amber-soft px-3 text-xs font-bold text-brand-brown focus:border-brand-orange focus:outline-none sm:col-span-2"
-                  />
-                  <input
-                    type="text"
-                    value={expNotes}
-                    onChange={(e) => setExpNotes(e.target.value)}
-                    placeholder="Catatan (opsional)"
-                    className="h-10 rounded-xl border border-brand-amber-soft px-3 text-xs text-brand-brown focus:border-brand-orange focus:outline-none sm:col-span-2"
-                  />
-                  <button
-                    type="submit"
-                    disabled={savingExp}
-                    className="inline-flex h-10 items-center justify-center gap-1 rounded-xl bg-brand-orange px-3 text-xs font-bold text-white hover:bg-brand-orange-dark disabled:opacity-60 sm:col-span-2"
-                  >
-                    <Plus className="h-4 w-4" />
-                    <span>Catat</span>
-                  </button>
-                </form>
-              )}
-
-              {report.expenses.length > 0 && (
-                <div className="mt-3 divide-y divide-brand-amber-soft/50 rounded-xl border border-brand-amber-soft/70">
-                  {report.expenses.map((ex) => (
-                    <div
-                      key={ex.id}
-                      className="flex flex-wrap items-center justify-between gap-2 px-3 py-2.5 text-xs"
-                    >
-                      <div>
-                        <span className="font-bold text-brand-brown">{ex.title}</span>
-                        <span className="ml-2 rounded-md bg-brand-cream-deep px-1.5 py-0.5 text-[10px] font-semibold text-brand-brown">
-                          {ex.category}
-                        </span>
-                        {ex.notes && (
-                          <p className="text-[11px] text-brand-brown/60">{ex.notes}</p>
-                        )}
-                      </div>
-                      <div className="flex items-center gap-2.5">
-                        <span className="font-extrabold text-rose-700">
-                          -{formatRupiah(ex.amount)}
-                        </span>
-                        {!isDayClosed && (
-                          <button
-                            type="button"
-                            onClick={() => void handleDeleteExpense(ex.id, ex.title)}
-                            className="rounded-lg p-1 text-rose-600 hover:bg-rose-50"
-                            aria-label="Hapus pengeluaran"
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                          </button>
-                        )}
-                      </div>
-                    </div>
+                    </button>
                   ))}
                 </div>
               )}
@@ -486,100 +633,299 @@ export function DailyReportPage({ storeStatus, onToast }: DailyReportPageProps) 
                   <h3 className="text-sm font-extrabold text-brand-brown">
                     Rekonsiliasi Stok Akhir Hari (Per Item Stok)
                   </h3>
-                  <p className="text-xs text-brand-brown/65">
+                  <p className="text-xs text-brand-brown/75">
                     Stok Awal + Restock − Terpakai = Sisa Sistem
                   </p>
                 </div>
-                {!isDayClosed && (
+                {isDayClosed ? (
+                  <span className="inline-flex items-center gap-1.5 rounded-full border border-rose-200 bg-rose-50 px-3 py-1 text-xs font-bold text-rose-700">
+                    <Lock className="h-3.5 w-3.5" />
+                    <span>Hari ditutup — opname terkunci</span>
+                  </span>
+                ) : (
+                  <div className="flex items-center gap-2">
+                    {dirty && (
+                      <button
+                        type="button"
+                        disabled={savingOpname}
+                        onClick={handleResetOpname}
+                        className="inline-flex h-10 items-center gap-1.5 rounded-xl border border-brand-amber bg-white px-3 text-xs font-bold text-brand-brown hover:bg-brand-cream-deep disabled:opacity-50"
+                      >
+                        <RotateCcw className="h-3.5 w-3.5" />
+                        <span>Batal</span>
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      disabled={!dirty || savingOpname}
+                      onClick={() => void handleSavePhysicalStock()}
+                      className="inline-flex h-10 items-center gap-1.5 rounded-xl bg-brand-orange-dark px-3.5 text-xs font-bold text-white hover:bg-brand-brown disabled:bg-stone-300"
+                    >
+                      <Save className="h-3.5 w-3.5" />
+                      <span>{savingOpname ? 'Menyimpan...' : 'Simpan Opname'}</span>
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {opnameError && (
+                <div
+                  role="alert"
+                  className="mb-3 rounded-xl border border-rose-200 bg-rose-50 px-3.5 py-2.5 text-xs font-semibold text-rose-700"
+                >
+                  {opnameError}
+                </div>
+              )}
+
+              {report.stock_reconciliation.length === 0 ? (
+                <p className="rounded-xl border border-dashed border-brand-amber-soft py-6 text-center text-xs text-brand-brown/75">
+                  Belum ada data stok pada tanggal {report.business_date}.
+                </p>
+              ) : (
+                <>
+                  {/* Mobile Stacked Opname Cards (< md) */}
+                  <div className="space-y-2.5 md:hidden">
+                    {report.stock_reconciliation.map((row) => {
+                      const d = drafts[row.stock_item_id];
+                      const raw = d?.physical ?? '';
+                      const parsed = parseNonNegativeInt(raw);
+                      const invalid = raw.trim() !== '' && parsed === null;
+                      const variance = parsed === null ? null : parsed - row.system_remaining;
+                      return (
+                        <div
+                          key={row.stock_item_id}
+                          className="rounded-xl border border-brand-amber-soft bg-brand-cream/40 p-3"
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0">
+                              <p className="text-xs font-extrabold text-brand-brown">
+                                {row.stock_name}{' '}
+                                <span className="font-semibold text-brand-brown/75">({row.unit})</span>
+                              </p>
+                              <p className="mt-0.5 text-[11px] tabular-nums text-brand-brown/75">
+                                Awal {row.initial_stock} • Restock {row.restocked_qty} • Terpakai {row.sold_qty}
+                              </p>
+                            </div>
+                            <span className="shrink-0 rounded-lg bg-white px-2 py-1 text-[11px] font-extrabold tabular-nums text-brand-brown ring-1 ring-brand-amber-soft">
+                              Sisa: {row.system_remaining}
+                            </span>
+                          </div>
+
+                          <div className="mt-2.5 flex items-center gap-2.5">
+                            <label className="flex flex-1 items-center gap-2 text-xs font-bold text-brand-brown">
+                              <span className="shrink-0">Fisik:</span>
+                              <input
+                                type="text"
+                                inputMode="numeric"
+                                pattern="[0-9]*"
+                                aria-label={`Stok fisik ${row.stock_name}`}
+                                disabled={isDayClosed}
+                                placeholder="0"
+                                value={raw}
+                                onChange={(e) => {
+                                  const cleaned = e.target.value.replace(/[^\d]/g, '');
+                                  setDrafts((prev) => ({
+                                    ...prev,
+                                    [row.stock_item_id]: {
+                                      physical: cleaned,
+                                      notes: prev[row.stock_item_id]?.notes ?? '',
+                                    },
+                                  }));
+                                  setDirty(true);
+                                  setOpnameError(null);
+                                }}
+                                className={`h-11 w-full rounded-xl border bg-white px-3 text-right text-sm font-extrabold tabular-nums text-brand-brown focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-orange disabled:bg-stone-100 ${
+                                  invalid ? 'border-rose-400' : 'border-brand-amber'
+                                }`}
+                              />
+                            </label>
+                            <div className="min-w-[84px] text-right text-xs font-extrabold tabular-nums">
+                              {invalid ? (
+                                <span className="text-rose-700">Tidak valid</span>
+                              ) : variance === null ? (
+                                <span className="text-brand-brown/70">Belum diisi</span>
+                              ) : variance === 0 ? (
+                                <span className="rounded-full bg-emerald-100 px-2 py-1 text-emerald-700">
+                                  Cocok (0)
+                                </span>
+                              ) : variance < 0 ? (
+                                <span className="rounded-full bg-rose-100 px-2 py-1 text-rose-700">
+                                  Kurang ({variance})
+                                </span>
+                              ) : (
+                                <span className="rounded-full bg-sky-100 px-2 py-1 text-sky-700">
+                                  Lebih (+{variance})
+                                </span>
+                              )}
+                            </div>
+                          </div>
+
+                          <input
+                            type="text"
+                            aria-label={`Catatan opname ${row.stock_name}`}
+                            disabled={isDayClosed}
+                            value={d?.notes ?? ''}
+                            onChange={(e) => {
+                              setDrafts((prev) => ({
+                                ...prev,
+                                [row.stock_item_id]: {
+                                  physical: prev[row.stock_item_id]?.physical ?? '',
+                                  notes: e.target.value,
+                                },
+                              }));
+                              setDirty(true);
+                            }}
+                            placeholder="Catatan selisih (opsional)"
+                            className="mt-2 h-10 w-full rounded-xl border border-brand-amber-soft bg-white px-3 text-xs text-brand-brown placeholder:text-brand-brown/60 focus:border-brand-orange-dark focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-orange disabled:bg-stone-100"
+                          />
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {/* Desktop Opname Table (md+) */}
+                  <div className="hidden overflow-x-auto md:block">
+                    <table className="min-w-full divide-y divide-brand-amber-soft/60 text-left text-xs tabular-nums">
+                      <thead className="bg-brand-cream text-[11px] font-bold uppercase text-brand-brown/80">
+                        <tr>
+                          <th className="sticky left-0 z-10 bg-brand-cream px-3 py-2.5">Item Stok</th>
+                          <th className="px-3 py-2.5 text-right">Awal</th>
+                          <th className="px-3 py-2.5 text-right">Restock</th>
+                          <th className="px-3 py-2.5 text-right">Terpakai</th>
+                          <th className="px-3 py-2.5 text-right">Sisa Sistem</th>
+                          <th className="px-3 py-2.5 text-right">Stok Fisik</th>
+                          <th className="px-3 py-2.5 text-right">Selisih</th>
+                          <th className="px-3 py-2.5">Catatan</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-brand-amber-soft/40">
+                        {report.stock_reconciliation.map((row) => {
+                          const d = drafts[row.stock_item_id];
+                          const raw = d?.physical ?? '';
+                          const parsed = parseNonNegativeInt(raw);
+                          const invalid = raw.trim() !== '' && parsed === null;
+                          const variance = parsed === null ? null : parsed - row.system_remaining;
+                          return (
+                            <tr key={row.stock_item_id}>
+                              <td className="sticky left-0 bg-white px-3 py-2 font-bold text-brand-brown">
+                                {row.stock_name}{' '}
+                                <span className="font-normal text-brand-brown/75">({row.unit})</span>
+                              </td>
+                              <td className="px-3 py-2 text-right">{row.initial_stock}</td>
+                              <td className="px-3 py-2 text-right">{row.restocked_qty}</td>
+                              <td className="px-3 py-2 text-right font-bold">{row.sold_qty}</td>
+                              <td className="px-3 py-2 text-right font-bold text-brand-brown">
+                                {row.system_remaining}
+                              </td>
+                              <td className="px-3 py-2 text-right">
+                                <input
+                                  type="text"
+                                  inputMode="numeric"
+                                  pattern="[0-9]*"
+                                  aria-label={`Stok fisik ${row.stock_name}`}
+                                  disabled={isDayClosed}
+                                  value={raw}
+                                  onChange={(e) => {
+                                    const cleaned = e.target.value.replace(/[^\d]/g, '');
+                                    setDrafts((prev) => ({
+                                      ...prev,
+                                      [row.stock_item_id]: {
+                                        physical: cleaned,
+                                        notes: prev[row.stock_item_id]?.notes ?? '',
+                                      },
+                                    }));
+                                    setDirty(true);
+                                    setOpnameError(null);
+                                  }}
+                                  className={`h-9 w-20 rounded-lg border bg-white px-2 text-right text-xs font-bold text-brand-brown focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-orange disabled:bg-stone-100 ${
+                                    invalid ? 'border-rose-400' : 'border-brand-amber'
+                                  }`}
+                                />
+                              </td>
+                              <td className="px-3 py-2 text-right font-bold">
+                                {invalid ? (
+                                  <span className="text-rose-700">Tidak valid</span>
+                                ) : variance === null ? (
+                                  <span className="text-brand-brown/70">—</span>
+                                ) : variance === 0 ? (
+                                  <span className="text-emerald-700">Cocok (0)</span>
+                                ) : variance < 0 ? (
+                                  <span className="text-rose-700">Kurang ({variance})</span>
+                                ) : (
+                                  <span className="text-sky-700">Lebih (+{variance})</span>
+                                )}
+                              </td>
+                              <td className="px-3 py-2">
+                                <input
+                                  type="text"
+                                  aria-label={`Catatan opname ${row.stock_name}`}
+                                  disabled={isDayClosed}
+                                  value={d?.notes ?? ''}
+                                  onChange={(e) => {
+                                    setDrafts((prev) => ({
+                                      ...prev,
+                                      [row.stock_item_id]: {
+                                        physical: prev[row.stock_item_id]?.physical ?? '',
+                                        notes: e.target.value,
+                                      },
+                                    }));
+                                    setDirty(true);
+                                  }}
+                                  placeholder="Opsional..."
+                                  className="h-9 w-36 rounded-lg border border-brand-amber-soft bg-white px-2 text-xs text-brand-brown placeholder:text-brand-brown/60 focus:border-brand-orange-dark focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-orange disabled:bg-stone-100"
+                                />
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              )}
+            </div>
+
+            {/* Sticky Unsaved Opname Bar */}
+            {dirty && !isDayClosed && (
+              <div className="sticky bottom-20 z-20 flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-brand-orange bg-brand-brown px-4 py-3 text-brand-cream shadow-lg md:bottom-4">
+                <p className="text-xs font-bold">
+                  Perubahan opname stok belum disimpan
+                </p>
+                <div className="flex items-center gap-2">
                   <button
                     type="button"
-                    disabled={!dirty || savingOpname}
+                    disabled={savingOpname}
+                    onClick={handleResetOpname}
+                    className="inline-flex h-10 items-center gap-1 rounded-xl border border-brand-cream/30 px-3 text-xs font-bold text-brand-cream hover:bg-brand-brown-dark disabled:opacity-50"
+                  >
+                    <RotateCcw className="h-3.5 w-3.5" />
+                    <span>Batal</span>
+                  </button>
+                  <button
+                    type="button"
+                    disabled={savingOpname}
                     onClick={() => void handleSavePhysicalStock()}
-                    className="inline-flex h-9 items-center gap-1.5 rounded-xl bg-brand-orange px-3.5 text-xs font-bold text-white hover:bg-brand-orange-dark disabled:bg-stone-300"
+                    className="inline-flex h-10 items-center gap-1.5 rounded-xl bg-brand-orange-dark px-4 text-xs font-extrabold text-white hover:bg-brand-orange disabled:opacity-50"
                   >
                     <Save className="h-3.5 w-3.5" />
                     <span>{savingOpname ? 'Menyimpan...' : 'Simpan Opname'}</span>
                   </button>
-                )}
+                </div>
               </div>
-
-              <div className="overflow-x-auto">
-                <table className="min-w-full divide-y divide-brand-amber-soft/60 text-left text-xs">
-                  <thead className="bg-brand-cream text-[11px] font-bold uppercase text-brand-brown/75">
-                    <tr>
-                      <th className="px-3 py-2.5">Item Stok</th>
-                      <th className="px-3 py-2.5 text-right">Awal</th>
-                      <th className="px-3 py-2.5 text-right">Restock</th>
-                      <th className="px-3 py-2.5 text-right">Terpakai</th>
-                      <th className="px-3 py-2.5 text-right">Sisa Sistem</th>
-                      <th className="px-3 py-2.5 text-right">Stok Fisik</th>
-                      <th className="px-3 py-2.5 text-right">Selisih</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-brand-amber-soft/40">
-                    {report.stock_reconciliation.map((row) => {
-                      const d = drafts[row.stock_item_id];
-                      const parsed = d && d.physical.trim() !== '' ? Number(d.physical) : null;
-                      const variance = parsed === null ? null : parsed - row.system_remaining;
-                      return (
-                        <tr key={row.stock_item_id}>
-                          <td className="px-3 py-2 font-bold text-brand-brown">
-                            {row.stock_name}{' '}
-                            <span className="font-normal text-brand-brown/55">({row.unit})</span>
-                          </td>
-                          <td className="px-3 py-2 text-right">{row.initial_stock}</td>
-                          <td className="px-3 py-2 text-right">{row.restocked_qty}</td>
-                          <td className="px-3 py-2 text-right font-bold">{row.sold_qty}</td>
-                          <td className="px-3 py-2 text-right font-bold text-brand-brown">
-                            {row.system_remaining}
-                          </td>
-                          <td className="px-3 py-2 text-right">
-                            <input
-                              type="number"
-                              min={0}
-                              disabled={isDayClosed}
-                              value={d?.physical ?? ''}
-                              onChange={(e) => {
-                                setDrafts((prev) => ({
-                                  ...prev,
-                                  [row.stock_item_id]: {
-                                    physical: e.target.value,
-                                    notes: prev[row.stock_item_id]?.notes ?? '',
-                                  },
-                                }));
-                                setDirty(true);
-                              }}
-                              className="h-8 w-20 rounded-lg border border-brand-amber-soft bg-white px-2 text-right text-xs font-bold text-brand-brown disabled:bg-stone-100"
-                            />
-                          </td>
-                          <td className="px-3 py-2 text-right font-bold">
-                            {variance === null ? (
-                              <span className="text-stone-400">—</span>
-                            ) : variance === 0 ? (
-                              <span className="text-emerald-700">Cocok (0)</span>
-                            ) : variance < 0 ? (
-                              <span className="text-rose-700">Kurang ({variance})</span>
-                            ) : (
-                              <span className="text-sky-700">Lebih (+{variance})</span>
-                            )}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            </div>
+            )}
 
             {/* Menu Sales Table */}
             {report.sales_by_menu.length > 0 && (
               <div className="rounded-2xl border border-brand-amber-soft bg-white p-4 shadow-sm">
-                <h3 className="mb-3 text-sm font-extrabold text-brand-brown">
-                  Rincian Penjualan per Menu
-                </h3>
+                <div className="mb-3 flex items-center justify-between gap-2">
+                  <h3 className="text-sm font-extrabold text-brand-brown">
+                    Rincian Penjualan per Menu
+                  </h3>
+                  <span className="text-[11px] text-brand-brown/70">Klik atau tekan Enter untuk detail nota</span>
+                </div>
                 <div className="overflow-x-auto">
-                  <table className="min-w-full divide-y divide-brand-amber-soft/60 text-left text-xs">
-                    <thead className="bg-brand-cream text-[11px] font-bold uppercase text-brand-brown/75">
+                  <table className="min-w-full divide-y divide-brand-amber-soft/60 text-left text-xs tabular-nums">
+                    <thead className="bg-brand-cream text-[11px] font-bold uppercase text-brand-brown/80">
                       <tr>
                         <th className="px-3 py-2">Menu</th>
                         <th className="px-3 py-2 text-right">Terjual</th>
@@ -587,15 +933,52 @@ export function DailyReportPage({ storeStatus, onToast }: DailyReportPageProps) 
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-brand-amber-soft/40">
-                      {report.sales_by_menu.map((m) => (
-                        <tr key={`${m.menu_item_id}-${m.menu_name}`}>
-                          <td className="px-3 py-2 font-bold text-brand-brown">{m.menu_name}</td>
-                          <td className="px-3 py-2 text-right font-semibold">{m.quantity_sold}</td>
-                          <td className="px-3 py-2 text-right font-extrabold text-brand-orange">
-                            {formatRupiah(m.total_revenue)}
-                          </td>
-                        </tr>
-                      ))}
+                      {report.sales_by_menu.map((m) => {
+                        const openMenuDrilldown = () => {
+                          const menuOrders = dailyOrders.filter(
+                            (o) =>
+                              o.status !== 'VOIDED' &&
+                              o.items.some(
+                                (it) =>
+                                  it.menu_item_id === m.menu_item_id &&
+                                  it.menu_name_snapshot === m.menu_name
+                              )
+                          );
+                          setDrilldown({
+                            kind: 'menu',
+                            title: `Transaksi Menu: ${m.menu_name}`,
+                            subtitle: `${report.business_date} • ${m.quantity_sold} porsi • ${formatRupiah(m.total_revenue)}`,
+                            menuItemId: m.menu_item_id,
+                            menuName: m.menu_name,
+                            orders: menuOrders,
+                          });
+                        };
+                        return (
+                          <tr
+                            key={`${m.menu_item_id}-${m.menu_name}`}
+                            role="button"
+                            tabIndex={0}
+                            aria-label={`Lihat rincian nota untuk menu ${m.menu_name}`}
+                            onClick={openMenuDrilldown}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter' || e.key === ' ') {
+                                e.preventDefault();
+                                openMenuDrilldown();
+                              }
+                            }}
+                            className="cursor-pointer transition hover:bg-brand-cream/70 focus-visible:bg-brand-cream focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand-orange"
+                          >
+                            <td className="px-3 py-2.5 font-bold text-brand-brown">{m.menu_name}</td>
+                            <td className="px-3 py-2.5 text-right font-semibold">{m.quantity_sold}</td>
+                            <td className="px-3 py-2.5 text-right font-extrabold text-brand-orange">
+                              <span className="inline-flex items-center gap-1">
+                                {formatRupiah(m.total_revenue)}
+                                <ChevronRight className="h-3.5 w-3.5 text-brand-orange/70" />
+                              </span>
+                            </td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>
@@ -618,31 +1001,37 @@ export function DailyReportPage({ storeStatus, onToast }: DailyReportPageProps) 
                 </span>
               </button>
               {showMovements && (
-                <div className="mt-3 max-h-72 overflow-y-auto divide-y divide-brand-amber-soft/40 text-xs">
-                  {movements.map((mv) => (
-                    <div key={mv.id} className="flex items-center justify-between gap-2 py-2">
-                      <div>
-                        <span className="font-bold text-brand-brown">{mv.stock_name}</span>
-                        <span className="ml-2 rounded bg-brand-cream-deep px-1.5 py-0.5 text-[10px] font-bold">
-                          {movementLabel(mv.movement_type)}
-                        </span>
-                        <p className="text-[11px] text-brand-brown/60">
-                          {formatTime(mv.created_at)} • {mv.note}
-                        </p>
+                movements.length === 0 ? (
+                  <p className="mt-3 py-4 text-center text-xs text-brand-brown/75">
+                    Belum ada mutasi stok tercatat pada tanggal ini.
+                  </p>
+                ) : (
+                  <div className="mt-3 max-h-72 overflow-y-auto divide-y divide-brand-amber-soft/40 text-xs">
+                    {movements.map((mv) => (
+                      <div key={mv.id} className="flex items-center justify-between gap-2 py-2">
+                        <div>
+                          <span className="font-bold text-brand-brown">{mv.stock_name}</span>
+                          <span className="ml-2 rounded bg-brand-cream-deep px-1.5 py-0.5 text-[10px] font-bold">
+                            {movementLabel(mv.movement_type)}
+                          </span>
+                          <p className="text-[11px] text-brand-brown/75">
+                            {formatTime(mv.created_at)} • {mv.note}
+                          </p>
+                        </div>
+                        <div className="text-right font-mono tabular-nums">
+                          <span
+                            className={`font-bold ${
+                              mv.qty_delta >= 0 ? 'text-emerald-700' : 'text-rose-700'
+                            }`}
+                          >
+                            {mv.qty_delta >= 0 ? `+${mv.qty_delta}` : mv.qty_delta}
+                          </span>
+                          <p className="text-[10px] text-brand-brown/75">Sisa: {mv.stock_after}</p>
+                        </div>
                       </div>
-                      <div className="text-right font-mono">
-                        <span
-                          className={`font-bold ${
-                            mv.qty_delta >= 0 ? 'text-emerald-700' : 'text-rose-700'
-                          }`}
-                        >
-                          {mv.qty_delta >= 0 ? `+${mv.qty_delta}` : mv.qty_delta}
-                        </span>
-                        <p className="text-[10px] text-brand-brown/55">Sisa: {mv.stock_after}</p>
-                      </div>
-                    </div>
-                  ))}
-                </div>
+                    ))}
+                  </div>
+                )
               )}
             </div>
           </div>
@@ -697,333 +1086,629 @@ export function DailyReportPage({ storeStatus, onToast }: DailyReportPageProps) 
             )}
           </div>
 
-          {loadingAnalytics || !analytics ? (
-            <div className="rounded-2xl border border-brand-amber-soft bg-white p-10 text-center text-sm text-brand-brown/60">
+          {loadingAnalytics && !analytics ? (
+            <div className="rounded-2xl border border-brand-amber-soft bg-white p-10 text-center text-sm text-brand-brown/75">
               Menghitung analitik performa...
             </div>
+          ) : !analytics ? (
+            <div className="rounded-2xl border border-rose-200 bg-white p-8 text-center">
+              <p className="text-sm font-bold text-brand-brown">
+                Analitik performa gagal dimuat.
+              </p>
+              <button
+                type="button"
+                onClick={() => void loadAnalytics()}
+                className="mt-3 inline-flex h-10 items-center gap-1.5 rounded-xl bg-brand-orange-dark px-4 text-xs font-bold text-white hover:bg-brand-brown"
+              >
+                <RefreshCw className="h-4 w-4" />
+                <span>Muat Ulang</span>
+              </button>
+            </div>
           ) : (
-            <div className="space-y-4">
-              {/* KPI Overview */}
-              <div className="grid grid-cols-2 gap-3 lg:grid-cols-6">
-                <div className="rounded-2xl border border-emerald-200 bg-white p-3.5 shadow-sm">
-                  <p className="text-[11px] font-semibold text-brand-brown/65">Total Pendapatan</p>
-                  <p className="mt-1 text-base font-extrabold text-emerald-700">
-                    {formatRupiah(analytics.summary.total_revenue)}
-                  </p>
-                </div>
-                <div className="rounded-2xl border border-rose-200 bg-white p-3.5 shadow-sm">
-                  <p className="text-[11px] font-semibold text-brand-brown/65">Total Pengeluaran</p>
-                  <p className="mt-1 text-base font-extrabold text-rose-700">
-                    {formatRupiah(analytics.summary.total_expenses)}
-                  </p>
-                </div>
-                <div className="rounded-2xl border border-brand-orange/40 bg-brand-cream-deep/70 p-3.5 shadow-sm">
-                  <p className="text-[11px] font-bold text-brand-brown">Laba Bersih</p>
-                  <p className="mt-1 text-base font-extrabold text-brand-brown">
-                    {formatRupiah(analytics.summary.net_profit)}
-                  </p>
-                </div>
-                <div className="rounded-2xl border border-brand-amber-soft bg-white p-3.5 shadow-sm">
-                  <p className="text-[11px] font-semibold text-brand-brown/65">Nota / Porsi</p>
-                  <p className="mt-1 text-base font-extrabold text-brand-brown">
-                    {analytics.summary.paid_orders} / {analytics.summary.total_portions}
-                  </p>
-                </div>
-                <div className="rounded-2xl border border-brand-amber-soft bg-white p-3.5 shadow-sm">
-                  <p className="text-[11px] font-semibold text-brand-brown/65">Rata-rata / Nota</p>
-                  <p className="mt-1 text-base font-extrabold text-brand-orange">
-                    {formatRupiah(analytics.summary.avg_order_value)}
-                  </p>
-                </div>
-                <div className="rounded-2xl border border-brand-amber-soft bg-white p-3.5 shadow-sm">
-                  <p className="text-[11px] font-semibold text-brand-brown/65">Hari Tutup / Aktif</p>
-                  <p className="mt-1 text-base font-extrabold text-brand-brown">
-                    {analytics.summary.closed_days_count} / {analytics.summary.active_days_count}
-                  </p>
-                </div>
-              </div>
+            <div className="space-y-6">
+              {/* Group 1: Ringkasan & Tren Keuangan */}
+              <section className="space-y-3">
+                <h2 className="text-sm font-extrabold tracking-tight text-brand-brown">
+                  Ringkasan &amp; Tren Keuangan ({analytics.from_date} – {analytics.to_date})
+                </h2>
 
-              {/* Channel Breakdown */}
-              <div className="rounded-2xl border border-brand-amber-soft bg-white p-4 shadow-sm">
-                <h3 className="mb-3 text-sm font-extrabold text-brand-brown">
-                  Performa Penjualan per Channel ({analytics.from_date} – {analytics.to_date})
-                </h3>
-                {analytics.by_channel.length === 0 ? (
-                  <p className="text-xs text-brand-brown/60">Belum ada data transaksi pada rentang ini.</p>
-                ) : (
-                  <div className="space-y-3">
-                    {analytics.by_channel.map((ch) => (
-                      <div key={ch.channel_name} className="space-y-1">
-                        <div className="flex items-center justify-between text-xs">
-                          <span className="font-bold text-brand-brown">
-                            {ch.channel_name}{' '}
-                            <span className="font-normal text-brand-brown/60">
-                              ({ch.order_count} nota)
-                            </span>
-                          </span>
-                          <span className="font-extrabold text-brand-orange">
-                            {formatRupiah(ch.revenue)} ({ch.share_percent}%)
-                          </span>
-                        </div>
-                        <div className="h-2.5 w-full overflow-hidden rounded-full bg-brand-cream-deep">
-                          <div
-                            className="h-full rounded-full bg-brand-orange"
-                            style={{ width: `${Math.min(100, Math.max(2, ch.share_percent))}%` }}
-                          />
-                        </div>
-                      </div>
-                    ))}
+                {/* KPI Overview */}
+                <div className="grid grid-cols-2 gap-3 tabular-nums lg:grid-cols-6">
+                  <div className="rounded-2xl border border-emerald-200 bg-white p-3.5 shadow-sm">
+                    <p className="text-[11px] font-semibold text-brand-brown/75">Total Pendapatan</p>
+                    <p className="mt-1 text-base font-extrabold text-emerald-700">
+                      {formatRupiah(analytics.summary.total_revenue)}
+                    </p>
                   </div>
-                )}
-              </div>
-
-              {/* Daily Trend */}
-              <div className="rounded-2xl border border-brand-amber-soft bg-white p-4 shadow-sm">
-                <h3 className="mb-3 text-sm font-extrabold text-brand-brown">
-                  Tren Harian (Pendapatan vs Pengeluaran)
-                </h3>
-                {analytics.daily_trend.length === 0 ? (
-                  <p className="text-xs text-brand-brown/60">Belum ada data harian.</p>
-                ) : (
-                  <div className="space-y-2.5">
-                    {analytics.daily_trend.map((d) => (
-                      <div
-                        key={d.business_date}
-                        className="rounded-xl border border-brand-amber-soft/60 bg-brand-cream/40 p-3 text-xs"
-                      >
-                        <div className="flex flex-wrap items-center justify-between gap-2">
-                          <div className="flex items-center gap-2">
-                            <span className="font-mono font-bold text-brand-brown">
-                              {d.business_date}
-                            </span>
-                            <span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-bold text-brand-brown/75">
-                              {d.store_status}
-                            </span>
-                            <span className="text-brand-brown/65">
-                              {d.order_count} nota • {d.portions_sold} porsi
-                            </span>
-                          </div>
-                          <div className="flex items-center gap-3 font-bold">
-                            <span className="text-emerald-700">+{formatRupiah(d.revenue)}</span>
-                            <span className="text-rose-700">-{formatRupiah(d.expenses)}</span>
-                            <span className="text-brand-brown">
-                              Bersih: {formatRupiah(d.net_profit)}
-                            </span>
-                          </div>
-                        </div>
-                        <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-white">
-                          <div
-                            className="h-full rounded-full bg-emerald-500"
-                            style={{
-                              width: `${Math.max(2, Math.round((d.revenue / maxTrendRev) * 100))}%`,
-                            }}
-                          />
-                        </div>
-                      </div>
-                    ))}
+                  <div className="rounded-2xl border border-rose-200 bg-white p-3.5 shadow-sm">
+                    <p className="text-[11px] font-semibold text-brand-brown/75">Total Pengeluaran</p>
+                    <p className="mt-1 text-base font-extrabold text-rose-700">
+                      {formatRupiah(analytics.summary.total_expenses)}
+                    </p>
                   </div>
-                )}
-              </div>
-
-              {/* Per-User Nota Creation Interval */}
-              <div className="rounded-2xl border border-brand-amber-soft bg-white p-4 shadow-sm">
-                <div className="mb-3 flex items-center gap-2">
-                  <Clock className="h-4 w-4 text-brand-orange" />
-                  <h3 className="text-sm font-extrabold text-brand-brown">
-                    Interval Pembuatan Nota per Pengguna
-                  </h3>
+                  <div className="rounded-2xl border border-brand-orange/40 bg-brand-cream-deep/70 p-3.5 shadow-sm">
+                    <p className="text-[11px] font-bold text-brand-brown">Laba Bersih</p>
+                    <p className="mt-1 text-base font-extrabold text-brand-brown">
+                      {formatRupiah(analytics.summary.net_profit)}
+                    </p>
+                  </div>
+                  <div className="rounded-2xl border border-brand-amber-soft bg-white p-3.5 shadow-sm">
+                    <p className="text-[11px] font-semibold text-brand-brown/75">Nota / Porsi</p>
+                    <p className="mt-1 text-base font-extrabold text-brand-brown">
+                      {analytics.summary.paid_orders} / {analytics.summary.total_portions}
+                    </p>
+                  </div>
+                  <div className="rounded-2xl border border-brand-amber-soft bg-white p-3.5 shadow-sm">
+                    <p className="text-[11px] font-semibold text-brand-brown/75">Rata-rata / Nota</p>
+                    <p className="mt-1 text-base font-extrabold text-brand-orange">
+                      {formatRupiah(analytics.summary.avg_order_value)}
+                    </p>
+                  </div>
+                  <div className="rounded-2xl border border-brand-amber-soft bg-white p-3.5 shadow-sm">
+                    <p className="text-[11px] font-semibold text-brand-brown/75">Hari Tutup / Aktif</p>
+                    <p className="mt-1 text-base font-extrabold text-brand-brown">
+                      {analytics.summary.closed_days_count} / {analytics.summary.active_days_count}
+                    </p>
+                  </div>
                 </div>
-                {analytics.user_order_intervals.length === 0 ? (
-                  <p className="text-xs text-brand-brown/60">Belum ada data pembuatan nota.</p>
-                ) : (
-                  <div className="overflow-x-auto">
-                    <table className="min-w-full divide-y divide-brand-amber-soft/60 text-left text-xs">
-                      <thead className="bg-brand-cream text-[11px] font-bold uppercase text-brand-brown/75">
-                        <tr>
-                          <th className="px-3 py-2">Username</th>
-                          <th className="px-3 py-2 text-right">Nota Dibuat</th>
-                          <th className="px-3 py-2 text-right">Rata-rata Interval</th>
-                          <th className="px-3 py-2 text-right">Tercepat</th>
-                          <th className="px-3 py-2 text-right">Terlama</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-brand-amber-soft/40">
-                        {analytics.user_order_intervals.map((u) => (
-                          <tr key={u.username}>
-                            <td className="px-3 py-2 font-mono font-bold text-brand-brown">
-                              @{u.username}
-                            </td>
-                            <td className="px-3 py-2 text-right font-bold">{u.orders_created}</td>
-                            <td className="px-3 py-2 text-right font-extrabold text-brand-orange">
-                              {formatDurationSeconds(u.avg_interval_seconds)}
-                            </td>
-                            <td className="px-3 py-2 text-right text-emerald-700">
-                              {formatDurationSeconds(u.min_interval_seconds)}
-                            </td>
-                            <td className="px-3 py-2 text-right text-brand-brown/75">
-                              {formatDurationSeconds(u.max_interval_seconds)}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
-              </div>
 
-              {/* Peak Hours & Busiest Weekdays */}
-              <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+                {/* Channel Breakdown */}
                 <div className="rounded-2xl border border-brand-amber-soft bg-white p-4 shadow-sm">
                   <h3 className="mb-3 text-sm font-extrabold text-brand-brown">
-                    Jam Ramai (Peak Hours WIB)
+                    Performa Penjualan per Channel
                   </h3>
-                  {analytics.peak_hours.length === 0 ? (
-                    <p className="text-xs text-brand-brown/60">Belum ada data jam ramai.</p>
+                  {analytics.by_channel.length === 0 ? (
+                    <p className="text-xs text-brand-brown/75">Belum ada data transaksi pada rentang ini.</p>
                   ) : (
-                    <div className="space-y-2">
-                      {analytics.peak_hours.map((p) => (
-                        <div key={p.hour} className="flex items-center gap-2 text-xs">
-                          <span className="w-12 font-mono font-bold text-brand-brown">
-                            {p.label}
-                          </span>
-                          <div className="h-3 flex-1 overflow-hidden rounded-full bg-brand-cream-deep">
+                    <div className="space-y-3 tabular-nums">
+                      {analytics.by_channel.map((ch) => (
+                        <div key={ch.channel_name} className="space-y-1">
+                          <div className="flex items-center justify-between text-xs">
+                            <span className="font-bold text-brand-brown">
+                              {ch.channel_name}{' '}
+                              <span className="font-normal text-brand-brown/70">
+                                ({ch.order_count} nota)
+                              </span>
+                            </span>
+                            <span className="font-extrabold text-brand-orange">
+                              {formatRupiah(ch.revenue)} ({ch.share_percent}%)
+                            </span>
+                          </div>
+                          <div className="h-2.5 w-full overflow-hidden rounded-full bg-brand-cream-deep">
                             <div
                               className="h-full rounded-full bg-brand-orange"
+                              style={{ width: `${Math.min(100, Math.max(2, ch.share_percent))}%` }}
+                            />
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* Daily Trend (Dual-Bar: Pendapatan vs Pengeluaran) */}
+                <div className="rounded-2xl border border-brand-amber-soft bg-white p-4 shadow-sm">
+                  <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                    <h3 className="text-sm font-extrabold text-brand-brown">
+                      Tren Harian (Pendapatan vs Pengeluaran)
+                    </h3>
+                    <div className="flex flex-wrap items-center gap-3 text-[11px] font-semibold text-brand-brown/75">
+                      <span className="inline-flex items-center gap-1.5">
+                        <span className="h-2 w-2 rounded-full bg-emerald-500" />
+                        Pendapatan
+                      </span>
+                      <span className="inline-flex items-center gap-1.5">
+                        <span className="h-2 w-2 rounded-full bg-rose-500" />
+                        Pengeluaran
+                      </span>
+                      <span className="text-brand-brown/65">• Klik tanggal untuk rincian</span>
+                    </div>
+                  </div>
+                  {analytics.daily_trend.length === 0 ? (
+                    <p className="text-xs text-brand-brown/75">Belum ada data harian.</p>
+                  ) : (
+                    <div className="space-y-2.5 tabular-nums">
+                      {analytics.daily_trend.map((d) => {
+                        const revPct =
+                          d.revenue > 0 ? Math.max(2, Math.round((d.revenue / maxTrendRev) * 100)) : 0;
+                        const expPct =
+                          d.expenses > 0 ? Math.max(2, Math.round((d.expenses / maxTrendRev) * 100)) : 0;
+                        return (
+                          <button
+                            key={d.business_date}
+                            type="button"
+                            onClick={() => {
+                              setDate(d.business_date);
+                              setTab('daily');
+                            }}
+                            className="block w-full rounded-xl border border-brand-amber-soft/60 bg-brand-cream/40 p-3 text-left text-xs transition hover:border-brand-orange hover:bg-brand-cream/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-orange"
+                          >
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <div className="flex items-center gap-2">
+                                <span className="font-mono font-bold text-brand-brown">
+                                  {d.business_date}
+                                </span>
+                                <span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-bold text-brand-brown/80">
+                                  {d.store_status}
+                                </span>
+                                <span className="text-brand-brown/75">
+                                  {d.order_count} nota • {d.portions_sold} porsi
+                                </span>
+                              </div>
+                              <div className="flex flex-wrap items-center gap-3 font-bold">
+                                <span className="text-emerald-700">+{formatRupiah(d.revenue)}</span>
+                                <span className="text-rose-700">-{formatRupiah(d.expenses)}</span>
+                                <span className="text-brand-brown">
+                                  Bersih: {formatRupiah(d.net_profit)}
+                                </span>
+                                <ChevronRight className="h-3.5 w-3.5 text-brand-orange/70" />
+                              </div>
+                            </div>
+                            <div className="mt-2 space-y-1">
+                              <div className="h-2 w-full overflow-hidden rounded-full bg-white">
+                                <div
+                                  className="h-full rounded-full bg-emerald-500"
+                                  style={{ width: `${revPct}%` }}
+                                />
+                              </div>
+                              <div className="h-1.5 w-full overflow-hidden rounded-full bg-white">
+                                <div
+                                  className="h-full rounded-full bg-rose-500"
+                                  style={{ width: `${expPct}%` }}
+                                />
+                              </div>
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              </section>
+
+              {/* Group 2: Pola Ramai & Performa Menu */}
+              <section className="space-y-3">
+                <h2 className="text-sm font-extrabold tracking-tight text-brand-brown">
+                  Pola Ramai &amp; Performa Menu
+                </h2>
+
+                {/* Peak Hours & Busiest Weekdays */}
+                <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+                  <div className="rounded-2xl border border-brand-amber-soft bg-white p-4 shadow-sm">
+                    <h3 className="mb-3 text-sm font-extrabold text-brand-brown">
+                      Jam Ramai (Peak Hours WIB)
+                    </h3>
+                    {analytics.peak_hours.length === 0 ? (
+                      <p className="text-xs text-brand-brown/75">Belum ada data jam ramai.</p>
+                    ) : (
+                      <div className="space-y-2 tabular-nums">
+                        {analytics.peak_hours.map((p) => (
+                          <div key={p.hour} className="flex items-center gap-2 text-xs">
+                            <span className="w-12 font-mono font-bold text-brand-brown">
+                              {p.label}
+                            </span>
+                            <div className="h-3 flex-1 overflow-hidden rounded-full bg-brand-cream-deep">
+                              <div
+                                className="h-full rounded-full bg-brand-orange"
+                                style={{
+                                  width: `${Math.max(5, Math.round((p.order_count / maxPeakOrders) * 100))}%`,
+                                }}
+                              />
+                            </div>
+                            <span className="w-20 text-right font-semibold text-brand-brown">
+                              {p.order_count} nota
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="rounded-2xl border border-brand-amber-soft bg-white p-4 shadow-sm">
+                    <h3 className="mb-3 text-sm font-extrabold text-brand-brown">
+                      Hari Tersibuk (Senin – Minggu)
+                    </h3>
+                    <div className="space-y-2 tabular-nums">
+                      {analytics.by_weekday.map((w) => (
+                        <div key={w.weekday_index} className="flex items-center gap-2 text-xs">
+                          <span className="w-16 font-bold text-brand-brown">{w.label}</span>
+                          <div className="h-3 flex-1 overflow-hidden rounded-full bg-brand-cream-deep">
+                            <div
+                              className="h-full rounded-full bg-brand-brown"
                               style={{
-                                width: `${Math.max(5, Math.round((p.order_count / maxPeakOrders) * 100))}%`,
+                                width: `${
+                                  w.revenue > 0
+                                    ? Math.max(4, Math.round((w.revenue / maxWeekdayRev) * 100))
+                                    : 0
+                                }%`,
                               }}
                             />
                           </div>
-                          <span className="w-24 text-right font-semibold text-brand-brown">
-                            {p.order_count} nota
+                          <span className="w-28 text-right font-semibold text-brand-brown">
+                            {formatRupiah(w.revenue)}
                           </span>
                         </div>
                       ))}
                     </div>
-                  )}
-                </div>
-
-                <div className="rounded-2xl border border-brand-amber-soft bg-white p-4 shadow-sm">
-                  <h3 className="mb-3 text-sm font-extrabold text-brand-brown">
-                    Hari Tersibuk (Senin – Minggu)
-                  </h3>
-                  <div className="space-y-2">
-                    {analytics.by_weekday.map((w) => (
-                      <div key={w.weekday_index} className="flex items-center gap-2 text-xs">
-                        <span className="w-16 font-bold text-brand-brown">{w.label}</span>
-                        <div className="h-3 flex-1 overflow-hidden rounded-full bg-brand-cream-deep">
-                          <div
-                            className="h-full rounded-full bg-brand-brown"
-                            style={{
-                              width: `${
-                                w.revenue > 0
-                                  ? Math.max(4, Math.round((w.revenue / maxWeekdayRev) * 100))
-                                  : 0
-                              }%`,
-                            }}
-                          />
-                        </div>
-                        <span className="w-28 text-right font-semibold text-brand-brown">
-                          {formatRupiah(w.revenue)}
-                        </span>
-                      </div>
-                    ))}
                   </div>
                 </div>
-              </div>
 
-              {/* Top & Bottom Menus */}
-              <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-                <div className="rounded-2xl border border-brand-amber-soft bg-white p-4 shadow-sm">
-                  <h3 className="mb-2.5 text-sm font-extrabold text-brand-brown">Menu Terlaris</h3>
-                  {analytics.top_menus.length === 0 ? (
-                    <p className="text-xs text-brand-brown/60">Belum ada penjualan.</p>
-                  ) : (
-                    <div className="divide-y divide-brand-amber-soft/40 text-xs">
-                      {analytics.top_menus.map((m, i) => (
-                        <div key={m.menu_name} className="flex items-center justify-between py-2">
-                          <span className="font-bold text-brand-brown">
-                            {i + 1}. {m.menu_name}
-                          </span>
-                          <span className="font-semibold text-brand-orange">
-                            {m.quantity_sold} porsi • {formatRupiah(m.total_revenue)}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-
-                <div className="rounded-2xl border border-brand-amber-soft bg-white p-4 shadow-sm">
-                  <h3 className="mb-2.5 text-sm font-extrabold text-brand-brown">
-                    Menu Kurang Laris
-                  </h3>
-                  {analytics.bottom_menus.length === 0 ? (
-                    <p className="text-xs text-brand-brown/60">Belum ada penjualan.</p>
-                  ) : (
-                    <div className="divide-y divide-brand-amber-soft/40 text-xs">
-                      {analytics.bottom_menus.map((m) => (
-                        <div key={m.menu_name} className="flex items-center justify-between py-2">
-                          <span className="font-bold text-brand-brown">{m.menu_name}</span>
-                          <span className="font-semibold text-brand-brown/75">
-                            {m.quantity_sold} porsi • {formatRupiah(m.total_revenue)}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              {/* Stock Usage & Variance History */}
-              {analytics.stock_summary.length > 0 && (
-                <div className="rounded-2xl border border-brand-amber-soft bg-white p-4 shadow-sm">
-                  <h3 className="mb-3 text-sm font-extrabold text-brand-brown">
-                    Ringkasan Pemakaian &amp; Selisih Stok
-                  </h3>
-                  <div className="overflow-x-auto">
-                    <table className="min-w-full divide-y divide-brand-amber-soft/60 text-left text-xs">
-                      <thead className="bg-brand-cream text-[11px] font-bold uppercase text-brand-brown/75">
-                        <tr>
-                          <th className="px-3 py-2">Item Stok</th>
-                          <th className="px-3 py-2 text-right">Total Stok Masuk</th>
-                          <th className="px-3 py-2 text-right">Terpakai</th>
-                          <th className="px-3 py-2 text-right">Sisa Tak Terjual</th>
-                          <th className="px-3 py-2 text-right">Selisih Opname</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-brand-amber-soft/40">
-                        {analytics.stock_summary.map((s) => (
-                          <tr key={s.stock_item_id}>
-                            <td className="px-3 py-2 font-bold text-brand-brown">
-                              {s.stock_name}{' '}
-                              <span className="font-normal text-brand-brown/55">({s.unit})</span>
-                            </td>
-                            <td className="px-3 py-2 text-right">{s.total_supplied}</td>
-                            <td className="px-3 py-2 text-right font-bold">{s.total_sold}</td>
-                            <td className="px-3 py-2 text-right">{s.total_leftover}</td>
-                            <td className="px-3 py-2 text-right font-bold">
-                              {s.opname_days === 0 ? (
-                                <span className="text-stone-400">Belum opname</span>
-                              ) : s.total_variance === 0 ? (
-                                <span className="text-emerald-700">0</span>
-                              ) : s.total_variance < 0 ? (
-                                <span className="text-rose-700">{s.total_variance}</span>
-                              ) : (
-                                <span className="text-sky-700">+{s.total_variance}</span>
-                              )}
-                            </td>
-                          </tr>
+                {/* Top & Bottom Menus */}
+                <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+                  <div className="rounded-2xl border border-brand-amber-soft bg-white p-4 shadow-sm">
+                    <h3 className="mb-2.5 text-sm font-extrabold text-brand-brown">Menu Terlaris</h3>
+                    {analytics.top_menus.length === 0 ? (
+                      <p className="text-xs text-brand-brown/75">Belum ada penjualan.</p>
+                    ) : (
+                      <div className="divide-y divide-brand-amber-soft/40 text-xs tabular-nums">
+                        {analytics.top_menus.map((m, i) => (
+                          <div key={m.menu_name} className="flex items-center justify-between gap-2 py-2">
+                            <span className="font-bold text-brand-brown">
+                              {i + 1}. {m.menu_name}
+                            </span>
+                            <span className="shrink-0 font-semibold text-brand-orange">
+                              {m.quantity_sold} porsi • {formatRupiah(m.total_revenue)}
+                            </span>
+                          </div>
                         ))}
-                      </tbody>
-                    </table>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="rounded-2xl border border-brand-amber-soft bg-white p-4 shadow-sm">
+                    <h3 className="mb-2.5 text-sm font-extrabold text-brand-brown">
+                      Menu Kurang Laris
+                    </h3>
+                    {analytics.bottom_menus.length === 0 ? (
+                      <p className="text-xs text-brand-brown/75">Belum ada penjualan.</p>
+                    ) : (
+                      <div className="divide-y divide-brand-amber-soft/40 text-xs tabular-nums">
+                        {analytics.bottom_menus.map((m) => (
+                          <div key={m.menu_name} className="flex items-center justify-between gap-2 py-2">
+                            <span className="font-bold text-brand-brown">{m.menu_name}</span>
+                            <span className="shrink-0 font-semibold text-brand-brown/75">
+                              {m.quantity_sold} porsi • {formatRupiah(m.total_revenue)}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 </div>
-              )}
+              </section>
+
+              {/* Group 3: Operasional & Stok */}
+              <section className="space-y-3">
+                <h2 className="text-sm font-extrabold tracking-tight text-brand-brown">
+                  Operasional &amp; Stok
+                </h2>
+
+                {/* Per-User Nota Creation Interval */}
+                <div className="rounded-2xl border border-brand-amber-soft bg-white p-4 shadow-sm">
+                  <div className="mb-3 flex items-center gap-2">
+                    <Clock className="h-4 w-4 text-brand-orange" />
+                    <h3 className="text-sm font-extrabold text-brand-brown">
+                      Interval Pembuatan Nota per Pengguna
+                    </h3>
+                  </div>
+                  {analytics.user_order_intervals.length === 0 ? (
+                    <p className="text-xs text-brand-brown/75">Belum ada data pembuatan nota.</p>
+                  ) : (
+                    <div className="overflow-x-auto">
+                      <table className="min-w-full divide-y divide-brand-amber-soft/60 text-left text-xs tabular-nums">
+                        <thead className="bg-brand-cream text-[11px] font-bold uppercase text-brand-brown/80">
+                          <tr>
+                            <th className="px-3 py-2">Username</th>
+                            <th className="px-3 py-2 text-right">Nota Dibuat</th>
+                            <th className="px-3 py-2 text-right">Rata-rata Interval</th>
+                            <th className="px-3 py-2 text-right">Tercepat</th>
+                            <th className="px-3 py-2 text-right">Terlama</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-brand-amber-soft/40">
+                          {analytics.user_order_intervals.map((u) => (
+                            <tr key={u.username}>
+                              <td className="px-3 py-2 font-mono font-bold text-brand-brown">
+                                @{u.username}
+                              </td>
+                              <td className="px-3 py-2 text-right font-bold">{u.orders_created}</td>
+                              <td className="px-3 py-2 text-right font-extrabold text-brand-orange">
+                                {formatDurationSeconds(u.avg_interval_seconds)}
+                              </td>
+                              <td className="px-3 py-2 text-right text-emerald-700">
+                                {formatDurationSeconds(u.min_interval_seconds)}
+                              </td>
+                              <td className="px-3 py-2 text-right text-brand-brown/75">
+                                {formatDurationSeconds(u.max_interval_seconds)}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+
+                {/* Stock Usage & Variance History */}
+                {analytics.stock_summary.length > 0 && (
+                  <div className="rounded-2xl border border-brand-amber-soft bg-white p-4 shadow-sm">
+                    <h3 className="mb-3 text-sm font-extrabold text-brand-brown">
+                      Ringkasan Pemakaian &amp; Selisih Stok
+                    </h3>
+                    <div className="overflow-x-auto">
+                      <table className="min-w-full divide-y divide-brand-amber-soft/60 text-left text-xs tabular-nums">
+                        <thead className="bg-brand-cream text-[11px] font-bold uppercase text-brand-brown/80">
+                          <tr>
+                            <th className="px-3 py-2">Item Stok</th>
+                            <th className="px-3 py-2 text-right">Total Stok Masuk</th>
+                            <th className="px-3 py-2 text-right">Terpakai</th>
+                            <th className="px-3 py-2 text-right">Sisa Tak Terjual</th>
+                            <th className="px-3 py-2 text-right">Selisih Opname</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-brand-amber-soft/40">
+                          {analytics.stock_summary.map((s) => (
+                            <tr key={s.stock_item_id}>
+                              <td className="px-3 py-2 font-bold text-brand-brown">
+                                {s.stock_name}{' '}
+                                <span className="font-normal text-brand-brown/70">({s.unit})</span>
+                              </td>
+                              <td className="px-3 py-2 text-right">{s.total_supplied}</td>
+                              <td className="px-3 py-2 text-right font-bold">{s.total_sold}</td>
+                              <td className="px-3 py-2 text-right">{s.total_leftover}</td>
+                              <td className="px-3 py-2 text-right font-bold">
+                                {s.opname_days === 0 ? (
+                                  <span className="text-brand-brown/65">Belum opname</span>
+                                ) : s.total_variance === 0 ? (
+                                  <span className="text-emerald-700">0</span>
+                                ) : s.total_variance < 0 ? (
+                                  <span className="text-rose-700">{s.total_variance}</span>
+                                ) : (
+                                  <span className="text-sky-700">+{s.total_variance}</span>
+                                )}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+              </section>
             </div>
           )}
         </div>
       )}
+
+      {/* Transaction Drilldown Sheet */}
+      <BottomSheet
+        open={drilldown !== null}
+        title={drilldown?.title ?? ''}
+        subtitle={drilldown?.subtitle}
+        onClose={() => setDrilldown(null)}
+      >
+        {drilldown?.kind === 'orders' && (
+          drilldown.orders.length === 0 ? (
+            <p className="py-6 text-center text-xs text-brand-brown/60">{drilldown.emptyText}</p>
+          ) : (
+            <div className="space-y-2.5">
+              {drilldown.orders.map((order) => {
+                const badge = orderStatusBadge(order.status);
+                return (
+                  <div
+                    key={order.id}
+                    className="rounded-xl border border-brand-amber-soft bg-brand-cream/40 p-3 text-xs"
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div>
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <span className="font-mono font-extrabold text-brand-brown">
+                            {order.order_number}
+                          </span>
+                          <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${badge.cls}`}>
+                            {badge.label}
+                          </span>
+                          <span className="rounded bg-white px-1.5 py-0.5 text-[10px] font-semibold text-brand-brown/80">
+                            {order.channel_name}
+                          </span>
+                        </div>
+                        <p className="mt-0.5 text-[11px] text-brand-brown/65">
+                          <span className="font-mono">{formatTimestamp(order.created_at)}</span> • @{order.waiter_name}
+                          {order.customer_label ? ` • ${order.customer_label}` : ''}
+                        </p>
+                      </div>
+                      <span className="shrink-0 text-sm font-extrabold text-brand-brown">
+                        {formatRupiah(order.total_amount)}
+                      </span>
+                    </div>
+
+                    <div className="mt-2 space-y-1 border-t border-brand-amber-soft/50 pt-2">
+                      {order.items.map((it) => (
+                        <div key={it.id} className="flex items-center justify-between gap-2 text-[11px]">
+                          <span className="text-brand-brown/85">
+                            {it.quantity}× {it.menu_name_snapshot}
+                            {it.item_note ? ` (${it.item_note})` : ''}
+                          </span>
+                          <span className="font-semibold text-brand-brown">
+                            {formatRupiah(it.subtotal)}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+
+                    {order.void_reason && (
+                      <p className="mt-2 rounded-lg bg-stone-100 px-2 py-1 text-[11px] text-stone-700">
+                        Alasan void: {order.void_reason}
+                      </p>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )
+        )}
+
+        {drilldown?.kind === 'expenses' && (
+          drilldown.expenses.length === 0 ? (
+            <p className="py-6 text-center text-xs text-brand-brown/60">
+              Belum ada catatan pengeluaran pada tanggal ini.
+            </p>
+          ) : (
+            <div className="space-y-2">
+              {drilldown.expenses.map((ex) => (
+                <div
+                  key={ex.id}
+                  className="flex items-start justify-between gap-2 rounded-xl border border-rose-200/80 bg-rose-50/40 p-3 text-xs"
+                >
+                  <div>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="font-bold text-brand-brown">{ex.title}</span>
+                      <span className="rounded bg-white px-1.5 py-0.5 text-[10px] font-semibold text-brand-brown/80">
+                        {ex.category}
+                      </span>
+                    </div>
+                    {ex.notes && <p className="mt-0.5 text-[11px] text-brand-brown/65">{ex.notes}</p>}
+                    <p className="mt-0.5 text-[10px] text-brand-brown/55">
+                      <span className="font-mono">{formatTimestamp(ex.created_at)}</span> • @{ex.created_by_username}
+                    </p>
+                  </div>
+                  <span className="shrink-0 font-extrabold text-rose-700">
+                    -{formatRupiah(ex.amount)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )
+        )}
+
+        {drilldown?.kind === 'net_profit' && (
+          <div className="space-y-4 text-xs">
+            <div className="grid grid-cols-3 gap-2 rounded-xl border border-brand-amber-soft bg-brand-cream/60 p-3 text-center">
+              <div>
+                <p className="text-[10px] font-semibold text-brand-brown/65">Lunas</p>
+                <p className="mt-0.5 font-extrabold text-emerald-700">
+                  +{formatRupiah(drilldown.paidTotal)}
+                </p>
+              </div>
+              <div>
+                <p className="text-[10px] font-semibold text-brand-brown/65">Pengeluaran</p>
+                <p className="mt-0.5 font-extrabold text-rose-700">
+                  -{formatRupiah(drilldown.expensesTotal)}
+                </p>
+              </div>
+              <div>
+                <p className="text-[10px] font-bold text-brand-brown">Laba Bersih</p>
+                <p
+                  className={`mt-0.5 font-extrabold ${
+                    drilldown.netProfit >= 0 ? 'text-brand-brown' : 'text-rose-700'
+                  }`}
+                >
+                  {formatRupiah(drilldown.netProfit)}
+                </p>
+              </div>
+            </div>
+
+            <div>
+              <h4 className="mb-2 font-extrabold text-emerald-700">
+                Pemasukan — Nota Lunas ({drilldown.orders.length})
+              </h4>
+              {drilldown.orders.length === 0 ? (
+                <p className="text-brand-brown/55">Belum ada nota lunas.</p>
+              ) : (
+                <div className="divide-y divide-brand-amber-soft/50 rounded-xl border border-brand-amber-soft/70">
+                  {drilldown.orders.map((o) => (
+                    <div key={o.id} className="flex items-center justify-between gap-2 px-3 py-2">
+                      <div>
+                        <span className="font-mono font-bold text-brand-brown">{o.order_number}</span>
+                        <span className="ml-1.5 text-[11px] text-brand-brown/65">
+                          {o.channel_name} • <span className="font-mono">{formatTimestamp(o.created_at)}</span>
+                        </span>
+                      </div>
+                      <span className="font-extrabold text-emerald-700">
+                        +{formatRupiah(o.total_amount)}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div>
+              <h4 className="mb-2 font-extrabold text-rose-700">
+                Pengeluaran Harian ({drilldown.expenses.length})
+              </h4>
+              {drilldown.expenses.length === 0 ? (
+                <p className="text-brand-brown/55">Belum ada pengeluaran.</p>
+              ) : (
+                <div className="divide-y divide-rose-200/60 rounded-xl border border-rose-200/70">
+                  {drilldown.expenses.map((ex) => (
+                    <div key={ex.id} className="flex items-center justify-between gap-2 px-3 py-2">
+                      <div>
+                        <span className="font-bold text-brand-brown">{ex.title}</span>
+                        <span className="ml-1.5 text-[11px] text-brand-brown/65">
+                          {ex.category} • <span className="font-mono">{formatTimestamp(ex.created_at)}</span>
+                        </span>
+                      </div>
+                      <span className="font-extrabold text-rose-700">
+                        -{formatRupiah(ex.amount)}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {drilldown?.kind === 'menu' && (
+          drilldown.orders.length === 0 ? (
+            <p className="py-6 text-center text-xs text-brand-brown/60">
+              Tidak ada transaksi untuk menu ini.
+            </p>
+          ) : (
+            <div className="space-y-2.5">
+              {drilldown.orders.map((order) => {
+                const badge = orderStatusBadge(order.status);
+                const matchingItems = order.items.filter(
+                  (it) =>
+                    it.menu_item_id === drilldown.menuItemId &&
+                    it.menu_name_snapshot === drilldown.menuName
+                );
+                const menuQty = matchingItems.reduce((acc, it) => acc + it.quantity, 0);
+                const menuSubtotal = matchingItems.reduce((acc, it) => acc + it.subtotal, 0);
+                return (
+                  <div
+                    key={order.id}
+                    className="flex items-center justify-between gap-2 rounded-xl border border-brand-amber-soft bg-brand-cream/40 p-3 text-xs"
+                  >
+                    <div>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span className="font-mono font-extrabold text-brand-brown">
+                          {order.order_number}
+                        </span>
+                        <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${badge.cls}`}>
+                          {badge.label}
+                        </span>
+                        <span className="rounded bg-white px-1.5 py-0.5 text-[10px] font-semibold text-brand-brown/80">
+                          {order.channel_name}
+                        </span>
+                      </div>
+                      <p className="mt-0.5 text-[11px] text-brand-brown/65">
+                        <span className="font-mono">{formatTimestamp(order.created_at)}</span> • @{order.waiter_name}
+                        {order.customer_label ? ` • ${order.customer_label}` : ''}
+                      </p>
+                    </div>
+                    <div className="text-right">
+                      <p className="font-extrabold text-brand-orange">{formatRupiah(menuSubtotal)}</p>
+                      <p className="text-[11px] font-semibold text-brand-brown/70">{menuQty} porsi</p>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )
+        )}
+      </BottomSheet>
     </div>
   );
 }

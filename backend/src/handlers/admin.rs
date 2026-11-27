@@ -14,8 +14,8 @@ use crate::{
     db::{begin_write_tx, now_iso},
     error::{AppError, AppResult},
     models::{
-        AdminUserSummary, AuthEventLog, CreateUserRequest, ResetPasswordRequest,
-        UpdateUserRequest, UserRow, UserSessionLog,
+        AdminUserSummary, AuthEventLog, CreateUserRequest, ReceiptSettings, ResetPasswordRequest,
+        UpdateReceiptSettingsRequest, UpdateUserRequest, UserRow, UserSessionLog,
     },
     AppState,
 };
@@ -447,4 +447,136 @@ pub async fn list_auth_events(
     };
 
     Ok(Json(rows))
+}
+
+const DEFAULT_RECEIPT_HEADER: &str = "Nasi Uduk 22 Kosambi - Mpok Indri";
+const DEFAULT_RECEIPT_FOOTER: &str = "Terima kasih atas kunjungan Anda!";
+const DEFAULT_RECEIPT_HEADER_FONT_SIZE: &str = "tall";
+
+fn normalize_receipt_font_size(raw: &str) -> AppResult<&'static str> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "normal" => Ok("normal"),
+        "tall" => Ok("tall"),
+        "wide" => Ok("wide"),
+        "large" => Ok("large"),
+        _ => Err(AppError::Validation(
+            "Ukuran font header harus salah satu dari: normal, tall, wide, large.".into(),
+        )),
+    }
+}
+
+fn normalize_receipt_text(raw: &str) -> String {
+    let normalized = raw.replace("\r\n", "\n").replace('\r', "\n");
+    normalized
+        .chars()
+        .filter(|&c| {
+            !(c.is_control() && c != '\n')
+                && !matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+        })
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+pub async fn get_receipt_settings(
+    auth: AuthUser,
+    State(state): State<AppState>,
+) -> AppResult<Json<ReceiptSettings>> {
+    let row: Option<ReceiptSettings> = sqlx::query_as(
+        "SELECT header_text, footer_text, header_bold, header_font_size, updated_at, updated_by_username FROM receipt_settings WHERE id = 1",
+    )
+    .fetch_optional(&state.pool)
+    .await?;
+
+    let mut settings = row.unwrap_or_else(|| ReceiptSettings {
+        header_text: DEFAULT_RECEIPT_HEADER.to_string(),
+        footer_text: DEFAULT_RECEIPT_FOOTER.to_string(),
+        header_bold: true,
+        header_font_size: DEFAULT_RECEIPT_HEADER_FONT_SIZE.to_string(),
+        updated_at: String::new(),
+        updated_by_username: String::new(),
+    });
+    if auth.role != Role::Admin {
+        settings.updated_by_username.clear();
+    }
+
+    Ok(Json(settings))
+}
+
+pub async fn update_receipt_settings(
+    auth: AuthUser,
+    State(state): State<AppState>,
+    Json(req): Json<UpdateReceiptSettingsRequest>,
+) -> AppResult<Json<ReceiptSettings>> {
+    auth.require_roles(&[Role::Admin])?;
+
+    let header_text = normalize_receipt_text(&req.header_text);
+    let footer_text = normalize_receipt_text(&req.footer_text);
+    let header_bold = req.header_bold;
+    let header_font_size = normalize_receipt_font_size(&req.header_font_size)?;
+
+    if header_text.is_empty() {
+        return Err(AppError::Validation(
+            "Header nota wajib diisi.".into(),
+        ));
+    }
+    if header_text.chars().count() > 300 {
+        return Err(AppError::Validation(
+            "Header nota maksimal 300 karakter.".into(),
+        ));
+    }
+    if footer_text.chars().count() > 300 {
+        return Err(AppError::Validation(
+            "Footer nota maksimal 300 karakter.".into(),
+        ));
+    }
+    if header_text.lines().count() > 8 || footer_text.lines().count() > 8 {
+        return Err(AppError::Validation(
+            "Header dan footer nota maksimal masing-masing 8 baris.".into(),
+        ));
+    }
+
+    let now = now_iso();
+    let header_bold_int: i64 = if header_bold { 1 } else { 0 };
+    let mut tx = begin_write_tx(&state.pool).await?;
+    sqlx::query(
+        r#"
+        INSERT INTO receipt_settings (id, header_text, footer_text, header_bold, header_font_size, updated_at, updated_by_username)
+        VALUES (1, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            header_text = excluded.header_text,
+            footer_text = excluded.footer_text,
+            header_bold = excluded.header_bold,
+            header_font_size = excluded.header_font_size,
+            updated_at = excluded.updated_at,
+            updated_by_username = excluded.updated_by_username
+        "#,
+    )
+    .bind(&header_text)
+    .bind(&footer_text)
+    .bind(header_bold_int)
+    .bind(header_font_size)
+    .bind(&now)
+    .bind(&auth.username)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    tracing::info!(
+        actor = %auth.username,
+        header_len = header_text.len(),
+        footer_len = footer_text.len(),
+        header_bold,
+        header_font_size,
+        "receipt settings updated"
+    );
+
+    Ok(Json(ReceiptSettings {
+        header_text,
+        footer_text,
+        header_bold,
+        header_font_size: header_font_size.to_string(),
+        updated_at: now,
+        updated_by_username: auth.username,
+    }))
 }

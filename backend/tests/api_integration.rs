@@ -9,8 +9,9 @@ use nota_digital_backend::{
     db::init_pool,
     models::{
         AdminUserSummary, AuthUserResponse, DailyExpense, DailyReportResponse,
-        ImportMenuCsvResponse, MenuItem, OrderDetail, PerformanceAnalyticsResponse, SalesChannel,
-        StockItem, StoreStatusResponse, UserSessionLog,
+        ImportMenuCsvResponse, MenuItem, OrderDetail, PerformanceAnalyticsResponse,
+        ReceiptSettings, ResetStoreDayResponse, SalesChannel, StockItem, StoreStatusResponse,
+        UserSessionLog,
     },
     AppState,
 };
@@ -366,7 +367,8 @@ async fn test_multistock_store_lifecycle_channels_expenses_and_analytics() {
     let stocks: Vec<StockItem> = serde_json::from_value(stocks_val).unwrap();
     assert!(stocks.iter().all(|s| s.current_stock == 0));
 
-    // Reopening today must fail (409) and adding expenses after close must fail (409)
+    // Reopening today must fail (409), while expenses remain allowed regardless of store status
+    // and keep closed store_days totals synced.
     let (status, _, _) = send_json_with_cookie(
         &app,
         Method::POST,
@@ -377,15 +379,42 @@ async fn test_multistock_store_lifecycle_channels_expenses_and_analytics() {
     .await;
     assert_eq!(status, StatusCode::CONFLICT);
 
-    let (status, _, _) = send_json_with_cookie(
+    let (status, late_val, _) = send_json_with_cookie(
         &app,
         Method::POST,
         "/api/expenses",
         Some(&admin_cookie),
-        Some(json!({ "title": "Telat", "amount": 5000 })),
+        Some(json!({ "title": "Belanja Setelah Tutup", "amount": 5000 })),
     )
     .await;
-    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(status, StatusCode::CREATED);
+    let late_exp: DailyExpense = serde_json::from_value(late_val).unwrap();
+    let (_, st_val, _) =
+        send_json_with_cookie(&app, Method::GET, "/api/store/status", Some(&admin_cookie), None)
+            .await;
+    let st_after_late: StoreStatusResponse = serde_json::from_value(st_val).unwrap();
+    let late_summary = st_after_late.closing_summary.unwrap();
+    assert_eq!(late_summary.total_expenses, 27000);
+    assert_eq!(late_summary.net_profit, 63000);
+
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::DELETE,
+        &format!("/api/expenses/{}", late_exp.id),
+        Some(&admin_cookie),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, st_val, _) =
+        send_json_with_cookie(&app, Method::GET, "/api/store/status", Some(&admin_cookie), None)
+            .await;
+    let restored_summary = serde_json::from_value::<StoreStatusResponse>(st_val)
+        .unwrap()
+        .closing_summary
+        .unwrap();
+    assert_eq!(restored_summary.total_expenses, 22000);
+    assert_eq!(restored_summary.net_profit, 68000);
 
     // 10. Verify Daily Report & Performance Analytics (preset=today)
     let (status, rep_val, _) = send_json_with_cookie(
@@ -519,7 +548,10 @@ async fn test_unified_login_rbac_paid_void_rules_and_session_timestamps() {
 
     let (_, owner_val, owner_cookie) = login_request(&app, "pemilik1", "password123").await;
     let owner_me: AuthUserResponse = serde_json::from_value(owner_val).unwrap();
-    assert_eq!(owner_me.allowed_tabs, vec!["waiter", "cashier", "menu", "report"]);
+    assert_eq!(
+        owner_me.allowed_tabs,
+        vec!["waiter", "cashier", "menu", "expenses", "report"]
+    );
     let owner_cookie = owner_cookie.unwrap();
 
     // Owner gets 403 on admin endpoint
@@ -838,4 +870,931 @@ async fn test_security_hardening_regression_guards() {
     assert_eq!(status, StatusCode::OK);
     let waiter_st: StoreStatusResponse = serde_json::from_value(waiter_st_val).unwrap();
     assert!(waiter_st.closing_summary.is_none());
+}
+
+#[tokio::test]
+async fn test_self_stock_menu_and_delete_archive_rules() {
+    let cfg = test_auth_config(5, 15);
+    let (app, _pool) = setup_app_with_config(cfg.clone()).await;
+
+    let (status, _, admin_cookie) =
+        login_request(&app, &cfg.admin_username, &cfg.admin_password).await;
+    assert_eq!(status, StatusCode::OK);
+    let admin_cookie = admin_cookie.unwrap();
+
+    // 1. Reject invalid create_self_stock_qty (<= 0)
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/menus",
+        Some(&admin_cookie),
+        Some(json!({
+            "name": "Tempe Orek",
+            "category": "Lauk",
+            "price": 5000,
+            "create_self_stock_qty": 0
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // 2. Create menu with create_self_stock_qty -> auto-creates and links self stock
+    let (status, menu_val, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/menus",
+        Some(&admin_cookie),
+        Some(json!({
+            "name": "Tempe Orek",
+            "category": "Lauk",
+            "price": 5000,
+            "create_self_stock_qty": 1
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let menu: MenuItem = serde_json::from_value(menu_val).unwrap();
+    assert_eq!(menu.stock_requirements.len(), 1);
+    let self_stock_id = menu.stock_requirements[0].stock_item_id;
+
+    // 3. Reject duplicate self-stock when also passed in stock_requirements
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/menus",
+        Some(&admin_cookie),
+        Some(json!({
+            "name": "Tempe Orek",
+            "category": "Lauk",
+            "price": 6000,
+            "stock_requirements": [{ "stock_item_id": self_stock_id, "qty_per_unit": 1 }],
+            "create_self_stock_qty": 2
+        })),
+    )
+    .await;
+    // Duplicate menu name returns 409; test with a fresh stock name for 400 validation
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    let (status, dup_stk_val, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/stocks",
+        Some(&admin_cookie),
+        Some(json!({ "name": "Sambal Kacang", "unit": "porsi" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let dup_stk: StockItem = serde_json::from_value(dup_stk_val).unwrap();
+
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/menus",
+        Some(&admin_cookie),
+        Some(json!({
+            "name": "Sambal Kacang",
+            "category": "Pelengkap",
+            "price": 2000,
+            "stock_requirements": [{ "stock_item_id": dup_stk.id, "qty_per_unit": 1 }],
+            "create_self_stock_qty": 2
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // 4. Cannot delete stock still linked to an active menu (409)
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::DELETE,
+        &format!("/api/stocks/{self_stock_id}"),
+        Some(&admin_cookie),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    // 5. Hard-delete unused menu -> soft_deleted: false, reason absent; then hard-delete stock
+    let (status, del_val, _) = send_json_with_cookie(
+        &app,
+        Method::DELETE,
+        &format!("/api/menus/{}", menu.id),
+        Some(&admin_cookie),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(del_val["deleted"], true);
+    assert_eq!(del_val["soft_deleted"], false);
+    assert!(del_val.get("reason").is_none());
+
+    let (status, del_stk_val, _) = send_json_with_cookie(
+        &app,
+        Method::DELETE,
+        &format!("/api/stocks/{self_stock_id}"),
+        Some(&admin_cookie),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(del_stk_val["soft_deleted"], false);
+
+    // 6. Menu with VOIDED order -> soft-deleted with VOID reason; stock with >0 qty blocked until closed
+    let (status, menu2_val, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/menus",
+        Some(&admin_cookie),
+        Some(json!({
+            "name": "Semur Jengkol",
+            "category": "Lauk",
+            "price": 12000,
+            "create_self_stock_qty": 1
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let menu2: MenuItem = serde_json::from_value(menu2_val).unwrap();
+    let stock2_id = menu2.stock_requirements[0].stock_item_id;
+
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/store/open",
+        Some(&admin_cookie),
+        Some(json!({ "stocks": [{ "stock_item_id": stock2_id, "initial_stock": 5 }] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (_, ch_val, _) =
+        send_json_with_cookie(&app, Method::GET, "/api/channels", Some(&admin_cookie), None).await;
+    let channels: Vec<SalesChannel> = serde_json::from_value(ch_val).unwrap();
+    let regular_id = channels.iter().find(|c| c.code == "regular").unwrap().id;
+
+    let (status, ord_val, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/orders",
+        Some(&admin_cookie),
+        Some(json!({
+            "channel_id": regular_id,
+            "items": [{ "menu_item_id": menu2.id, "quantity": 1 }]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let ord: OrderDetail = serde_json::from_value(ord_val).unwrap();
+
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        &format!("/api/orders/{}/void", ord.id),
+        Some(&admin_cookie),
+        Some(json!({ "reason": "Batal pesan" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Deleting menu2 archives it with VOID reason
+    let (status, del_m2, _) = send_json_with_cookie(
+        &app,
+        Method::DELETE,
+        &format!("/api/menus/{}", menu2.id),
+        Some(&admin_cookie),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(del_m2["soft_deleted"], true);
+    assert!(del_m2["reason"].as_str().unwrap().contains("VOID"));
+
+    // Deleting stock2 while current_stock == 5 is blocked (409) to preserve audit trail
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::DELETE,
+        &format!("/api/stocks/{stock2_id}"),
+        Some(&admin_cookie),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    // After closing store (resets current_stock to 0 with CLOSE_RESET movement), stock2 archives cleanly
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/store/close",
+        Some(&admin_cookie),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, del_s2, _) = send_json_with_cookie(
+        &app,
+        Method::DELETE,
+        &format!("/api/stocks/{stock2_id}"),
+        Some(&admin_cookie),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(del_s2["soft_deleted"], true);
+    assert!(del_s2["reason"].as_str().is_some());
+}
+
+#[tokio::test]
+async fn test_expense_categories_and_editable_expenses() {
+    let cfg = test_auth_config(5, 15);
+    let (app, _pool) = setup_app_with_config(cfg.clone()).await;
+    let (status, _, admin_cookie) =
+        login_request(&app, &cfg.admin_username, &cfg.admin_password).await;
+    assert_eq!(status, StatusCode::OK);
+    let admin_cookie = admin_cookie.unwrap();
+
+    // 1. Seeded defaults are present
+    let (status, cats_val, _) = send_json_with_cookie(
+        &app,
+        Method::GET,
+        "/api/expense-categories",
+        Some(&admin_cookie),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(cats_val.as_array().unwrap().len() >= 5);
+
+    // 2. Create category; duplicate (case-insensitive) is rejected; blank is rejected
+    let (status, cat_val, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/expense-categories",
+        Some(&admin_cookie),
+        Some(json!({ "name": "Transport" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let cat_id = cat_val["id"].as_i64().unwrap();
+    for (body, expected) in [
+        (json!({ "name": "transport" }), StatusCode::CONFLICT),
+        (json!({ "name": "   " }), StatusCode::BAD_REQUEST),
+    ] {
+        let (status, _, _) = send_json_with_cookie(
+            &app,
+            Method::POST,
+            "/api/expense-categories",
+            Some(&admin_cookie),
+            Some(body),
+        )
+        .await;
+        assert_eq!(status, expected);
+    }
+
+    // 3. Expenses must use a known active category
+    let (status, exp_val, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/expenses",
+        Some(&admin_cookie),
+        Some(json!({ "title": "Ojek beli ayam", "category": "Transport", "amount": 10000 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let expense: DailyExpense = serde_json::from_value(exp_val).unwrap();
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/expenses",
+        Some(&admin_cookie),
+        Some(json!({ "title": "Ngawur", "category": "Tidak Ada", "amount": 5000 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // 4. Renaming a category relabels recorded expenses
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::PUT,
+        &format!("/api/expense-categories/{cat_id}"),
+        Some(&admin_cookie),
+        Some(json!({ "name": "Ongkir", "is_active": true })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, list_val, _) =
+        send_json_with_cookie(&app, Method::GET, "/api/expenses", Some(&admin_cookie), None).await;
+    let listed: Vec<DailyExpense> = serde_json::from_value(list_val).unwrap();
+    assert_eq!(
+        listed.iter().find(|e| e.id == expense.id).unwrap().category,
+        "Ongkir"
+    );
+    // Renaming onto another category's name conflicts; a case-only rename of itself is fine
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::PUT,
+        &format!("/api/expense-categories/{cat_id}"),
+        Some(&admin_cookie),
+        Some(json!({ "name": "kemasan", "is_active": true })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::PUT,
+        "/api/expense-categories/999999",
+        Some(&admin_cookie),
+        Some(json!({ "name": "X", "is_active": true })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // 4b. Deactivated category: an expense keeps its own retired label on edit, others cannot adopt it
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::PUT,
+        &format!("/api/expense-categories/{cat_id}"),
+        Some(&admin_cookie),
+        Some(json!({ "name": "Ongkir", "is_active": false })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let edit_uri = format!("/api/expenses/{}", expense.id);
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::PUT,
+        &edit_uri,
+        Some(&admin_cookie),
+        Some(json!({ "title": "Ojek (koreksi)", "category": "Ongkir", "amount": 11000 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/expenses",
+        Some(&admin_cookie),
+        Some(json!({ "title": "Ojek lagi", "category": "Ongkir", "amount": 7000 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    // Missing category falls back to "Operasional"
+    let (status, def_val, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/expenses",
+        Some(&admin_cookie),
+        Some(json!({ "title": "Tanpa kategori", "amount": 3000 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(def_val["category"], "Operasional");
+
+    // 5. Edit an expense (title/category/amount/notes); invalid input is rejected
+
+    let (status, upd_val, _) = send_json_with_cookie(
+        &app,
+        Method::PUT,
+        &edit_uri,
+        Some(&admin_cookie),
+        Some(json!({
+            "title": "Beli kantong plastik",
+            "category": "Kemasan",
+            "amount": 15000,
+            "notes": "koreksi"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let updated: DailyExpense = serde_json::from_value(upd_val).unwrap();
+    assert_eq!(updated.title, "Beli kantong plastik");
+    assert_eq!(updated.category, "Kemasan");
+    assert_eq!(updated.amount, 15000);
+    assert_eq!(updated.notes, "koreksi");
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::PUT,
+        &edit_uri,
+        Some(&admin_cookie),
+        Some(json!({ "title": "x", "category": "Kemasan", "amount": 0 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::PUT,
+        "/api/expenses/999999",
+        Some(&admin_cookie),
+        Some(json!({ "title": "x", "category": "Kemasan", "amount": 100 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // 6. Deactivated categories cannot be newly used, but an expense keeps its own retired label
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::PUT,
+        &format!("/api/expense-categories/{cat_id}"),
+        Some(&admin_cookie),
+        Some(json!({ "name": "Ongkir", "is_active": false })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/expenses",
+        Some(&admin_cookie),
+        Some(json!({ "title": "Ojek lagi", "category": "Ongkir", "amount": 7000 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // 7. Cashiers cannot manage categories or edit expenses
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/admin/users",
+        Some(&admin_cookie),
+        Some(json!({
+            "username": "kasir1",
+            "full_name": "Kasir Satu",
+            "password": "password123",
+            "role": "cashier"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, _, cashier_cookie) = login_request(&app, "kasir1", "password123").await;
+    assert_eq!(status, StatusCode::OK);
+    let cashier_cookie = cashier_cookie.unwrap();
+    for (method, uri, body) in [
+        (Method::GET, "/api/expense-categories".to_string(), None),
+        (
+            Method::POST,
+            "/api/expense-categories".to_string(),
+            Some(json!({ "name": "Hack" })),
+        ),
+        (
+            Method::PUT,
+            edit_uri.clone(),
+            Some(json!({ "title": "x", "category": "Kemasan", "amount": 100 })),
+        ),
+    ] {
+        let (status, _, _) =
+            send_json_with_cookie(&app, method, &uri, Some(&cashier_cookie), body).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    // 8. Closed days still allow editing/creating expenses and keep closing_summary synced
+    let stock = create_stock(&app, &admin_cookie, "Nasi Uduk", "porsi").await;
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/store/open",
+        Some(&admin_cookie),
+        Some(json!({ "stocks": [{ "stock_item_id": stock.id, "initial_stock": 10 }] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/store/close",
+        Some(&admin_cookie),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    // Malformed business_date on edit is rejected with 400
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::PUT,
+        &edit_uri,
+        Some(&admin_cookie),
+        Some(json!({
+            "business_date": "not-a-date",
+            "title": "Koreksi tanggal",
+            "category": "Kemasan",
+            "amount": 12000
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (status, upd_closed, _) = send_json_with_cookie(
+        &app,
+        Method::PUT,
+        &edit_uri,
+        Some(&admin_cookie),
+        Some(json!({
+            "business_date": "2020-01-15",
+            "title": "Koreksi tanggal",
+            "category": "Kemasan",
+            "amount": 12000
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(upd_closed["business_date"], "2020-01-15");
+    assert_eq!(upd_closed["amount"], 12000);
+    // Moving that expense off today updated today's closed store_days.total_expenses (only the 3000 default remains)
+    let (_, st_val, _) =
+        send_json_with_cookie(&app, Method::GET, "/api/store/status", Some(&admin_cookie), None)
+            .await;
+    let st_closed = serde_json::from_value::<StoreStatusResponse>(st_val)
+        .unwrap()
+        .closing_summary
+        .unwrap();
+    assert_eq!(st_closed.total_expenses, 3000);
+    assert_eq!(st_closed.net_profit, -3000);
+}
+
+#[tokio::test]
+async fn test_admin_force_reset_store_day_and_sql_backup() {
+    let cfg = test_auth_config(5, 15);
+    let pool = init_pool("sqlite::memory:", false)
+        .await
+        .expect("failed to init in-memory sqlite");
+    sync_env_admin(&pool, &cfg)
+        .await
+        .expect("failed to sync env admin");
+
+    let temp_backup_dir = std::env::temp_dir().join(format!(
+        "nota_digital_test_backups_{}_{}",
+        std::process::id(),
+        chrono::Local::now().timestamp_nanos_opt().unwrap_or(0)
+    ));
+    let app = build_router(
+        AppState::new(pool.clone(), cfg.clone()).with_backup_dir(temp_backup_dir.clone()),
+        None,
+    );
+
+    let (status, _, admin_cookie) =
+        login_request(&app, &cfg.admin_username, &cfg.admin_password).await;
+    assert_eq!(status, StatusCode::OK);
+    let admin_cookie = admin_cookie.unwrap();
+
+    // Create an owner account to verify strict Admin-only RBAC
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/admin/users",
+        Some(&admin_cookie),
+        Some(json!({
+            "username": "owner_reset_test",
+            "full_name": "Pemilik Warung",
+            "role": "owner",
+            "password": "OwnerPassword123!"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, _, owner_cookie) =
+        login_request(&app, "owner_reset_test", "OwnerPassword123!").await;
+    assert_eq!(status, StatusCode::OK);
+    let owner_cookie = owner_cookie.unwrap();
+
+    // 1. Owner cannot reset store day (403 Forbidden)
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/store/reset-day",
+        Some(&owner_cookie),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // 2. Admin calling reset when NOT_OPENED and empty returns 409 Conflict and creates no backup
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/store/reset-day",
+        Some(&admin_cookie),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(!temp_backup_dir.exists());
+
+    // 3. Create stock + menu, open store, create & pay order (with single quotes), add expense, close store
+    let stock = create_stock(&app, &admin_cookie, "Nasi Uduk Reset Test", "porsi").await;
+    let (status, menu_val, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/menus",
+        Some(&admin_cookie),
+        Some(json!({
+            "name": "Nasi Uduk Komplit",
+            "category": "Makanan",
+            "price": 18000,
+            "stock_requirements": [{ "stock_item_id": stock.id, "qty_per_unit": 1 }]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let menu: MenuItem = serde_json::from_value(menu_val).unwrap();
+
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/store/open",
+        Some(&admin_cookie),
+        Some(json!({ "stocks": [{ "stock_item_id": stock.id, "initial_stock": 20 }] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (_, channels_val, _) =
+        send_json_with_cookie(&app, Method::GET, "/api/channels", Some(&admin_cookie), None).await;
+    let channels: Vec<SalesChannel> = serde_json::from_value(channels_val).unwrap();
+    let regular_id = channels.iter().find(|c| c.code == "regular").unwrap().id;
+
+    let (status, order_val, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/orders",
+        Some(&admin_cookie),
+        Some(json!({
+            "channel_id": regular_id,
+            "customer_label": "Pak O'Connor",
+            "notes": "Bungkus 'pedas'",
+            "items": [{ "menu_item_id": menu.id, "quantity": 2, "item_note": "Sambel 'ekstra'" }]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let order: OrderDetail = serde_json::from_value(order_val).unwrap();
+
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        &format!("/api/orders/{}/pay", order.id),
+        Some(&admin_cookie),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, exp_val, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/expenses",
+        Some(&admin_cookie),
+        Some(json!({ "title": "Beli gas LPG", "category": "Operasional", "amount": 25000 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let expense: DailyExpense = serde_json::from_value(exp_val).unwrap();
+
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/store/close",
+        Some(&admin_cookie),
+        Some(json!({ "closing_notes": "Tutup 'uji coba'" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // 4. Admin triggers force reset & rollback
+    let (status, reset_val, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/store/reset-day",
+        Some(&admin_cookie),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let reset_res: ResetStoreDayResponse = serde_json::from_value(reset_val).unwrap();
+    assert!(reset_res.backup_filename.starts_with("force-backup-"));
+    assert!(reset_res.backup_filename.ends_with(".sql"));
+    assert_eq!(reset_res.deleted_orders, 1);
+    assert!(reset_res.deleted_snapshots >= 1);
+    assert!(reset_res.deleted_movements >= 1);
+    assert_eq!(reset_res.store_status.status, "NOT_OPENED");
+
+    // 5. Verify backup file contents & that it executes cleanly back into SQLite
+    let backup_path = temp_backup_dir.join(&reset_res.backup_filename);
+    assert!(backup_path.exists());
+    let sql_text = std::fs::read_to_string(&backup_path).expect("read backup sql");
+    assert!(sql_text.contains("INSERT INTO store_days "));
+    assert!(sql_text.contains("INSERT INTO orders "));
+    assert!(sql_text.contains("INSERT INTO order_items "));
+    assert!(sql_text.contains("INSERT INTO order_stock_deductions "));
+    assert!(sql_text.contains("INSERT INTO daily_stock_item_snapshots "));
+    assert!(sql_text.contains("INSERT INTO stock_item_movements "));
+    assert!(sql_text.contains("Pak O''Connor"));
+    assert!(sql_text.contains("Bungkus ''pedas''"));
+    assert!(!sql_text.contains("INSERT INTO daily_expenses"));
+
+    // Verify daily_expenses were preserved
+    let (_, exps_after, _) =
+        send_json_with_cookie(&app, Method::GET, "/api/expenses", Some(&admin_cookie), None).await;
+    let exps_after: Vec<DailyExpense> = serde_json::from_value(exps_after).unwrap();
+    assert!(exps_after.iter().any(|e| e.id == expense.id));
+
+    // Verify restoring the generated SQL script works cleanly on SQLite without syntax/FK errors
+    sqlx::raw_sql(&sql_text)
+        .execute(&pool)
+        .await
+        .expect("generated force-backup SQL must execute cleanly");
+
+    let (_, restored_status_val, _) =
+        send_json_with_cookie(&app, Method::GET, "/api/store/status", Some(&admin_cookie), None)
+            .await;
+    let restored_status: StoreStatusResponse = serde_json::from_value(restored_status_val).unwrap();
+    assert_eq!(restored_status.status, "CLOSED");
+
+    // 6. Reset a second time (also validates filename collision handling if within same second)
+    //    and confirm the store can now be opened again for today!
+    let (status, reset_val2, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/store/reset-day",
+        Some(&admin_cookie),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let reset_res2: ResetStoreDayResponse = serde_json::from_value(reset_val2).unwrap();
+    assert!(temp_backup_dir.join(&reset_res2.backup_filename).exists());
+
+    let (status, reopened_val, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/store/open",
+        Some(&admin_cookie),
+        Some(json!({ "stocks": [{ "stock_item_id": stock.id, "initial_stock": 15 }] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let reopened: StoreStatusResponse = serde_json::from_value(reopened_val).unwrap();
+    assert_eq!(reopened.status, "OPEN");
+
+    // 7. Reset while OPEN (non-zero stock_items.current_stock == 15) and verify UPDATE stock_items backup + restore
+    let (status, reset_open_val, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/store/reset-day",
+        Some(&admin_cookie),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let reset_open: ResetStoreDayResponse = serde_json::from_value(reset_open_val).unwrap();
+    let open_sql = std::fs::read_to_string(temp_backup_dir.join(&reset_open.backup_filename))
+        .expect("read open-day backup sql");
+    assert!(open_sql.contains("UPDATE stock_items SET current_stock = 15"));
+    let (stock_after_reset,): (i64,) =
+        sqlx::query_as("SELECT current_stock FROM stock_items WHERE id = ?")
+            .bind(stock.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(stock_after_reset, 0);
+
+    sqlx::raw_sql(&open_sql)
+        .execute(&pool)
+        .await
+        .expect("open-day force-backup SQL must execute cleanly");
+    let (stock_restored,): (i64,) =
+        sqlx::query_as("SELECT current_stock FROM stock_items WHERE id = ?")
+            .bind(stock.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(stock_restored, 15);
+
+    let _ = std::fs::remove_dir_all(&temp_backup_dir);
+}
+
+#[tokio::test]
+async fn test_receipt_settings_admin_config_and_rbac() {
+    let (app, _pool, admin_cookie) = setup_app().await;
+
+    // Create cashier to verify read access vs admin-only write access
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/admin/users",
+        Some(&admin_cookie),
+        Some(json!({
+            "username": "kasir_receipt_test",
+            "full_name": "Kasir Struk",
+            "role": "cashier",
+            "password": "CashierPassword123!"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, _, cashier_cookie) =
+        login_request(&app, "kasir_receipt_test", "CashierPassword123!").await;
+    assert_eq!(status, StatusCode::OK);
+    let cashier_cookie = cashier_cookie.unwrap();
+
+    // 1. Unauthenticated access is rejected (401); seeded default is readable by cashier (with admin username redacted)
+    let (status, _, _) =
+        send_json_with_cookie(&app, Method::GET, "/api/receipt-settings", None, None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let (status, val, _) = send_json_with_cookie(
+        &app,
+        Method::GET,
+        "/api/receipt-settings",
+        Some(&cashier_cookie),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let initial: ReceiptSettings = serde_json::from_value(val).unwrap();
+    assert_eq!(initial.header_text, "Nasi Uduk 22 Kosambi - Mpok Indri");
+    assert_eq!(initial.footer_text, "Terima kasih atas kunjungan Anda!");
+    assert!(initial.header_bold);
+    assert_eq!(initial.header_font_size, "tall");
+    assert_eq!(initial.updated_by_username, "");
+
+    // 2. Non-admin cannot update receipt settings (403)
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::PUT,
+        "/api/admin/receipt-settings",
+        Some(&cashier_cookie),
+        Some(json!({ "header_text": "Hacked", "footer_text": "Nope" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // 3. Validation checks: blank/control-only header, >300 chars, >8 lines
+    for bad_body in [
+        json!({ "header_text": "   ", "footer_text": "OK" }),
+        json!({ "header_text": "\u{001b}\u{001d}", "footer_text": "OK" }),
+        json!({ "header_text": "A".repeat(301), "footer_text": "OK" }),
+        json!({ "header_text": "OK", "footer_text": "B".repeat(301) }),
+        json!({ "header_text": "1\n2\n3\n4\n5\n6\n7\n8\n9", "footer_text": "OK" }),
+        json!({ "header_text": "OK", "footer_text": "1\n2\n3\n4\n5\n6\n7\n8\n9" }),
+        json!({ "header_text": "OK", "footer_text": "OK", "header_bold": true, "header_font_size": "huge" }),
+    ] {
+        let (status, _, _) = send_json_with_cookie(
+            &app,
+            Method::PUT,
+            "/api/admin/receipt-settings",
+            Some(&admin_cookie),
+            Some(bad_body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    // 4. Admin updates multiline header/footer + bold/font size (CRLF normalized to LF)
+    let (status, upd_val, _) = send_json_with_cookie(
+        &app,
+        Method::PUT,
+        "/api/admin/receipt-settings",
+        Some(&admin_cookie),
+        Some(json!({
+            "header_text": "  Nasi Uduk 22 Kosambi\r\nJl. Kosambi No. 22  ",
+            "footer_text": "Terima kasih!\r\nWA: 0812-0000-0000",
+            "header_bold": false,
+            "header_font_size": "LARGE"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let updated: ReceiptSettings = serde_json::from_value(upd_val).unwrap();
+    assert_eq!(updated.header_text, "Nasi Uduk 22 Kosambi\nJl. Kosambi No. 22");
+    assert_eq!(updated.footer_text, "Terima kasih!\nWA: 0812-0000-0000");
+    assert!(!updated.header_bold);
+    assert_eq!(updated.header_font_size, "large");
+    assert_eq!(updated.updated_by_username, "superadmin");
+
+    // 5. Empty footer is allowed
+    let (status, empty_footer_val, _) = send_json_with_cookie(
+        &app,
+        Method::PUT,
+        "/api/admin/receipt-settings",
+        Some(&admin_cookie),
+        Some(json!({
+            "header_text": "Warung Mpok Indri",
+            "footer_text": "   "
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let empty_footer: ReceiptSettings = serde_json::from_value(empty_footer_val).unwrap();
+    assert_eq!(empty_footer.footer_text, "");
+
+    let (status, persisted_val, _) = send_json_with_cookie(
+        &app,
+        Method::GET,
+        "/api/receipt-settings",
+        Some(&cashier_cookie),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let persisted: ReceiptSettings = serde_json::from_value(persisted_val).unwrap();
+    assert_eq!(persisted.header_text, "Warung Mpok Indri");
+    assert_eq!(persisted.footer_text, "");
 }

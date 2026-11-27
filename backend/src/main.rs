@@ -105,6 +105,12 @@ async fn main() {
     let static_dir = std::env::var("STATIC_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("../frontend/dist"));
+    let backup_dir = std::env::var("BACKUP_DIR")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("backups"));
 
     let seed_sample_data = std::env::var("SEED_SAMPLE_DATA")
         .ok()
@@ -131,17 +137,18 @@ async fn main() {
         }
     });
 
-    let state = AppState::new(pool.clone(), auth_config.clone());
+    let state = AppState::new(pool.clone(), auth_config.clone()).with_backup_dir(backup_dir.clone());
     let app = build_router(state, Some(static_dir.clone()));
 
     let addr = SocketAddr::new(host, port);
     let tz_offset = chrono::Local::now().offset().to_string();
     tracing::info!(
-        "NotaDigital API aktif di http://{} (tz: {}, database: {}, static: {}, admin: {}, max_failed: {}, lockout_min: {})",
+        "NotaDigital API aktif di http://{} (tz: {}, database: {}, static: {}, backups: {}, admin: {}, max_failed: {}, lockout_min: {})",
         addr,
         tz_offset,
         database_url,
         static_dir.display(),
+        backup_dir.display(),
         auth_config.admin_username,
         auth_config.max_failed_attempts,
         auth_config.lockout_minutes

@@ -10,7 +10,7 @@ use axum::{
     http::{header, HeaderValue, Method},
     middleware::{self, Next},
     response::Response,
-    routing::{delete, get, post, put},
+    routing::{get, post, put},
     Json, Router,
 };
 use error::AppError;
@@ -28,6 +28,7 @@ pub struct AppState {
     pub pool: SqlitePool,
     pub auth_config: AuthConfig,
     pub hash_semaphore: Arc<Semaphore>,
+    pub backup_dir: PathBuf,
 }
 
 impl AppState {
@@ -37,7 +38,13 @@ impl AppState {
             auth_config: auth_config.redacted_for_state(),
             // Cap concurrent Argon2id calls to 2 (~38 MiB peak RAM) to protect 1 vCPU / 956 MiB host
             hash_semaphore: Arc::new(Semaphore::new(2)),
+            backup_dir: PathBuf::from("backups"),
         }
+    }
+
+    pub fn with_backup_dir(mut self, backup_dir: PathBuf) -> Self {
+        self.backup_dir = backup_dir;
+        self
     }
 }
 
@@ -134,10 +141,16 @@ pub fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         .route("/admin/users/:id/unlock", post(handlers::admin::unlock_user))
         .route("/admin/sessions", get(handlers::admin::list_sessions))
         .route("/admin/auth-events", get(handlers::admin::list_auth_events))
+        .route(
+            "/admin/receipt-settings",
+            put(handlers::admin::update_receipt_settings),
+        )
+        .route("/receipt-settings", get(handlers::admin::get_receipt_settings))
         // Daily Store Open / Close Lifecycle
         .route("/store/status", get(handlers::store::get_store_status))
         .route("/store/open", post(handlers::store::open_store))
         .route("/store/close", post(handlers::store::close_store))
+        .route("/store/reset-day", post(handlers::store::reset_store_day))
         // Stock Items (Separate daily stock entities)
         .route(
             "/stocks",
@@ -177,7 +190,19 @@ pub fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
             "/expenses",
             get(handlers::expenses::list_expenses).post(handlers::expenses::create_expense),
         )
-        .route("/expenses/:id", delete(handlers::expenses::delete_expense))
+        .route(
+            "/expenses/:id",
+            put(handlers::expenses::update_expense).delete(handlers::expenses::delete_expense),
+        )
+        .route(
+            "/expense-categories",
+            get(handlers::expenses::list_expense_categories)
+                .post(handlers::expenses::create_expense_category),
+        )
+        .route(
+            "/expense-categories/:id",
+            put(handlers::expenses::update_expense_category),
+        )
         // Orders (Nota Digital)
         .route(
             "/orders",
