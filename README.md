@@ -66,7 +66,7 @@ Aplikasi web POS & kontrol stok harian untuk **Nasi Uduk 22 Kosambi - Mpok Indri
 ### 7. Promo Berbasis Kuota & Promo Section Struk (Tab Khusus Pemilik & Admin)
 - **Konfigurasi Promo (Tab `Promo` untuk Pemilik & Admin):**
   - Mendukung potongan **Nominal (`FIXED` Rp)** maupun **Persentase (`PERCENT` % + batas maksimal Rp)**, minimal belanja, rentang tanggal opsional, dan pembatasan saluran (`Khusus Regular` atau semua channel).
-  - **Kuota Pelanggan (`TOTAL` / `DAILY` / `UNLIMITED`)**: Contoh *"Promo 50 Pelanggan Pertama"* atau *"10 Pelanggan Pertama/Hari"* dengan validasi atomik di SQLite (kuota otomatis kembali jika promo dihapus atau nota dibatalkan/`VOIDED`).
+  - **Kuota Pelanggan Terbatas (`quota_limit > 0`, wajib diisi):** Setiap promo wajib memiliki batas kuota anggaran (mis. *"Promo 50 Pelanggan Pertama"*) yang dijaga secara atomik $O(1)$ (`used_count < quota_limit`) melalui tabel terpisah `applied_promotions` (kuota otomatis kembali jika promo dihapus atau nota dibatalkan/`VOIDED`).
 - **Promo Section Kondisional di Struk 58mm:**
   - Setiap promo memiliki pengaturan **Promo Section** (teks kecil opsional + pilihan tunggal: **Tanpa Gambar**, **QR Code** ESC/POS `GS ( k`, atau **Barcode CODE128** ESC/POS `GS k`).
   - **Hanya tercetak saat promo diterapkan pada nota**; nota tanpa promo berhenti di footer normal.

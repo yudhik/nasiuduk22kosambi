@@ -13,7 +13,6 @@ import { BottomSheet } from './BottomSheet';
 import type { ToastMessage } from './ToastContainer';
 import type {
   PromoDiscountType,
-  PromoQuotaType,
   PromoReceiptMediaType,
   Promotion,
 } from '../types';
@@ -43,7 +42,6 @@ export function PromotionsSection({ onToast }: PromotionsSectionProps) {
   const [discountValue, setDiscountValue] = useState('');
   const [maxDiscount, setMaxDiscount] = useState('');
   const [minOrder, setMinOrder] = useState('');
-  const [quotaType, setQuotaType] = useState<PromoQuotaType>('TOTAL');
   const [quotaLimit, setQuotaLimit] = useState('50');
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
@@ -77,7 +75,6 @@ export function PromotionsSection({ onToast }: PromotionsSectionProps) {
     setDiscountValue('');
     setMaxDiscount('');
     setMinOrder('');
-    setQuotaType('TOTAL');
     setQuotaLimit('50');
     setStartDate('');
     setEndDate('');
@@ -101,8 +98,7 @@ export function PromotionsSection({ onToast }: PromotionsSectionProps) {
     );
     setMaxDiscount(p.max_discount ? formatThousandsInput(String(p.max_discount)) : '');
     setMinOrder(p.min_order_amount > 0 ? formatThousandsInput(String(p.min_order_amount)) : '');
-    setQuotaType(p.quota_type);
-    setQuotaLimit(p.quota_limit ? String(p.quota_limit) : '');
+    setQuotaLimit(String(p.quota_limit));
     setStartDate(p.start_date ?? '');
     setEndDate(p.end_date ?? '');
     setRegularOnly(p.regular_only);
@@ -127,11 +123,10 @@ export function PromotionsSection({ onToast }: PromotionsSectionProps) {
         ? parseThousandsInput(maxDiscount)
         : null;
     const parsedMin = minOrder.trim() ? parseThousandsInput(minOrder) : 0;
-    const parsedQuota =
-      quotaType !== 'UNLIMITED' && quotaLimit.trim() ? Number(quotaLimit) : null;
+    const parsedQuota = Number(quotaLimit);
 
-    if (quotaType !== 'UNLIMITED' && (!parsedQuota || Number.isNaN(parsedQuota) || parsedQuota < 1)) {
-      setError('Jumlah kuota minimal 1 pelanggan.');
+    if (!parsedQuota || Number.isNaN(parsedQuota) || parsedQuota < 1) {
+      setError('Kuota promo wajib diisi minimal 1 pelanggan.');
       return;
     }
     if (mediaType !== 'NONE' && !mediaValue.trim()) {
@@ -152,7 +147,6 @@ export function PromotionsSection({ onToast }: PromotionsSectionProps) {
         discount_value: parsedDisc,
         max_discount: parsedMax && !Number.isNaN(parsedMax) ? parsedMax : null,
         min_order_amount: Number.isNaN(parsedMin) ? 0 : parsedMin,
-        quota_type: quotaType,
         quota_limit: parsedQuota,
         start_date: startDate.trim() || null,
         end_date: endDate.trim() || null,
@@ -245,10 +239,9 @@ export function PromotionsSection({ onToast }: PromotionsSectionProps) {
       ) : (
         <div className="grid gap-3 md:grid-cols-2">
           {visiblePromos.map((p) => {
-            const used = p.quota_type === 'DAILY' ? p.used_today : p.used_total;
             const pct =
-              p.quota_limit && p.quota_limit > 0
-                ? Math.min(100, Math.round((used / p.quota_limit) * 100))
+              p.quota_limit > 0
+                ? Math.min(100, Math.round((p.used_count / p.quota_limit) * 100))
                 : 0;
             return (
               <div
@@ -303,34 +296,24 @@ export function PromotionsSection({ onToast }: PromotionsSectionProps) {
                 </div>
 
                 {/* Quota Bar */}
-                {p.quota_type !== 'UNLIMITED' && p.quota_limit ? (
-                  <div className="mt-3 rounded-xl bg-brand-cream/70 p-2.5">
-                    <div className="flex items-center justify-between text-[11px] font-bold text-brand-brown">
-                      <span>
-                        Kuota {p.quota_type === 'DAILY' ? 'Harian' : 'Total'}: {used}/{p.quota_limit}
-                      </span>
-                      <span
-                        className={
-                          (p.remaining_quota ?? 0) === 0 ? 'text-rose-600' : 'text-emerald-700'
-                        }
-                      >
-                        Sisa {p.remaining_quota ?? 0}
-                      </span>
-                    </div>
-                    <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-brand-amber-soft/70">
-                      <div
-                        className={`h-full rounded-full ${
-                          pct >= 100 ? 'bg-rose-500' : 'bg-brand-orange'
-                        }`}
-                        style={{ width: `${pct}%` }}
-                      />
-                    </div>
+                <div className="mt-3 rounded-xl bg-brand-cream/70 p-2.5">
+                  <div className="flex items-center justify-between text-[11px] font-bold text-brand-brown">
+                    <span>
+                      Kuota: {p.used_count}/{p.quota_limit} pelanggan
+                    </span>
+                    <span className={p.remaining_quota === 0 ? 'text-rose-600' : 'text-emerald-700'}>
+                      Sisa {p.remaining_quota}
+                    </span>
                   </div>
-                ) : (
-                  <p className="mt-2.5 text-[11px] font-semibold text-brand-brown/60">
-                    Kuota tanpa batas • Terpakai {p.used_total}x total ({p.used_today}x hari ini)
-                  </p>
-                )}
+                  <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-brand-amber-soft/70">
+                    <div
+                      className={`h-full rounded-full ${
+                        pct >= 100 ? 'bg-rose-500' : 'bg-brand-orange'
+                      }`}
+                      style={{ width: `${pct}%` }}
+                    />
+                  </div>
+                </div>
 
                 {/* Receipt Promo Section Badge */}
                 <div className="mt-2.5 flex flex-wrap items-center gap-1.5 border-t border-brand-amber-soft/50 pt-2 text-[11px]">
@@ -474,36 +457,18 @@ export function PromotionsSection({ onToast }: PromotionsSectionProps) {
             )}
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="mb-1 block text-xs font-semibold text-brand-brown/80">
-                Batas Kuota
-              </label>
-              <select
-                value={quotaType}
-                onChange={(e) => setQuotaType(e.target.value as PromoQuotaType)}
-                className="h-11 w-full rounded-xl border border-brand-amber-soft bg-white px-3 text-sm font-semibold text-brand-brown focus:border-brand-orange focus:outline-none"
-              >
-                <option value="TOTAL">Total X Pelanggan Pertama</option>
-                <option value="DAILY">Harian (X/Hari)</option>
-                <option value="UNLIMITED">Tanpa Batas</option>
-              </select>
-            </div>
-            {quotaType !== 'UNLIMITED' && (
-              <div>
-                <label className="mb-1 block text-xs font-semibold text-brand-brown/80">
-                  Jumlah Kuota (X)
-                </label>
-                <input
-                  type="number"
-                  min={1}
-                  value={quotaLimit}
-                  onChange={(e) => setQuotaLimit(e.target.value)}
-                  placeholder="50"
-                  className="h-11 w-full rounded-xl border border-brand-amber-soft px-3.5 text-sm font-semibold tabular-nums text-brand-brown focus:border-brand-orange focus:outline-none"
-                />
-              </div>
-            )}
+          <div>
+            <label className="mb-1 block text-xs font-semibold text-brand-brown/80">
+              Kuota Pelanggan (Wajib, min. 1)
+            </label>
+            <input
+              type="number"
+              min={1}
+              value={quotaLimit}
+              onChange={(e) => setQuotaLimit(e.target.value)}
+              placeholder="50"
+              className="h-11 w-full rounded-xl border border-brand-amber-soft px-3.5 text-sm font-semibold tabular-nums text-brand-brown focus:border-brand-orange focus:outline-none"
+            />
           </div>
 
           <div className="grid grid-cols-2 gap-3">

@@ -9,11 +9,9 @@ use serde_json::{json, Value};
 
 use crate::{
     auth::{AuthUser, Role},
-    db::{begin_write_tx, now_iso, today_date},
+    db::{begin_write_tx, now_iso},
     error::{AppError, AppResult},
-    models::{
-        CreatePromotionRequest, PromotionResponse, PromotionRow, UpdatePromotionRequest,
-    },
+    models::{CreatePromotionRequest, PromotionResponse, PromotionRow, UpdatePromotionRequest},
     AppState,
 };
 
@@ -73,8 +71,7 @@ struct ValidatedPromo {
     discount_value: i64,
     max_discount: Option<i64>,
     min_order_amount: i64,
-    quota_type: &'static str,
-    quota_limit: Option<i64>,
+    quota_limit: i64,
     start_date: Option<String>,
     end_date: Option<String>,
     regular_only: i64,
@@ -90,8 +87,7 @@ fn validate_promo_fields(
     discount_value: i64,
     max_discount: Option<i64>,
     min_order_amount: i64,
-    quota_type: &str,
-    quota_limit: Option<i64>,
+    quota_limit: i64,
     start_date: Option<&str>,
     end_date: Option<&str>,
     regular_only: bool,
@@ -147,29 +143,11 @@ fn validate_promo_fields(
         ));
     }
 
-    let qtype: &'static str = match quota_type.trim().to_ascii_uppercase().as_str() {
-        "UNLIMITED" => "UNLIMITED",
-        "TOTAL" => "TOTAL",
-        "DAILY" => "DAILY",
-        _ => {
-            return Err(AppError::Validation(
-                "Tipe kuota harus UNLIMITED, TOTAL, atau DAILY.".into(),
-            ))
-        }
-    };
-
-    let clean_quota_limit = match qtype {
-        "UNLIMITED" => None,
-        "TOTAL" | "DAILY" => match quota_limit {
-            Some(v) if (1..=1_000_000).contains(&v) => Some(v),
-            _ => {
-                return Err(AppError::Validation(
-                    "Jumlah kuota wajib diisi antara 1 hingga 1.000.000.".into(),
-                ))
-            }
-        },
-        _ => None,
-    };
+    if !(1..=1_000_000).contains(&quota_limit) {
+        return Err(AppError::Validation(
+            "Kuota promo wajib diisi antara 1 hingga 1.000.000 pelanggan.".into(),
+        ));
+    }
 
     let clean_start = parse_optional_date(start_date, "Tanggal mulai")?;
     let clean_end = parse_optional_date(end_date, "Tanggal berakhir")?;
@@ -244,8 +222,7 @@ fn validate_promo_fields(
         discount_value,
         max_discount: clean_max_discount,
         min_order_amount,
-        quota_type: qtype,
-        quota_limit: clean_quota_limit,
+        quota_limit,
         start_date: clean_start,
         end_date: clean_end,
         regular_only: if regular_only { 1 } else { 0 },
@@ -255,78 +232,25 @@ fn validate_promo_fields(
     })
 }
 
-async fn hydrate_promotion_response(
-    pool: &sqlx::SqlitePool,
-    row: PromotionRow,
-    today: &str,
-) -> AppResult<PromotionResponse> {
-    let (used_total, used_today): (i64, i64) = sqlx::query_as(
-        r#"
-        SELECT
-            COUNT(*) AS used_total,
-            COALESCE(SUM(CASE WHEN business_date = ? THEN 1 ELSE 0 END), 0) AS used_today
-        FROM orders
-        WHERE promo_id = ? AND status != 'VOIDED'
-        "#,
-    )
-    .bind(today)
-    .bind(row.id)
-    .fetch_one(pool)
-    .await?;
-
-    Ok(PromotionResponse::from_row(row, used_total, used_today))
-}
-
 pub async fn list_promotions(
     auth: AuthUser,
     State(state): State<AppState>,
     Query(query): Query<ListPromotionsQuery>,
 ) -> AppResult<Json<Vec<PromotionResponse>>> {
     auth.require_roles(&[Role::Cashier, Role::Owner, Role::Admin])?;
-    let today = today_date();
 
     let active_only = auth.role == Role::Cashier || query.active_only.unwrap_or(false);
     let rows: Vec<PromotionRow> = if active_only {
-        sqlx::query_as(
-            "SELECT * FROM promotions WHERE is_active = 1 ORDER BY id DESC",
-        )
-        .fetch_all(&state.pool)
-        .await?
+        sqlx::query_as("SELECT * FROM promotions WHERE is_active = 1 ORDER BY id DESC")
+            .fetch_all(&state.pool)
+            .await?
     } else {
         sqlx::query_as("SELECT * FROM promotions ORDER BY is_active DESC, id DESC")
             .fetch_all(&state.pool)
             .await?
     };
 
-    let usage_rows: Vec<(i64, i64, i64)> = sqlx::query_as(
-        r#"
-        SELECT
-            promo_id,
-            COUNT(*) AS used_total,
-            COALESCE(SUM(CASE WHEN business_date = ? THEN 1 ELSE 0 END), 0) AS used_today
-        FROM orders
-        WHERE promo_id IS NOT NULL AND status != 'VOIDED'
-        GROUP BY promo_id
-        "#,
-    )
-    .bind(&today)
-    .fetch_all(&state.pool)
-    .await?;
-
-    let usage_map: std::collections::HashMap<i64, (i64, i64)> = usage_rows
-        .into_iter()
-        .map(|(pid, total, day)| (pid, (total, day)))
-        .collect();
-
-    let result = rows
-        .into_iter()
-        .map(|row| {
-            let (used_total, used_today) = usage_map.get(&row.id).copied().unwrap_or((0, 0));
-            PromotionResponse::from_row(row, used_total, used_today)
-        })
-        .collect();
-
-    Ok(Json(result))
+    Ok(Json(rows.into_iter().map(PromotionResponse::from).collect()))
 }
 
 pub async fn create_promotion(
@@ -342,7 +266,6 @@ pub async fn create_promotion(
         req.discount_value,
         req.max_discount,
         req.min_order_amount.unwrap_or(0),
-        req.quota_type.as_deref().unwrap_or("UNLIMITED"),
         req.quota_limit,
         req.start_date.as_deref(),
         req.end_date.as_deref(),
@@ -358,11 +281,11 @@ pub async fn create_promotion(
         r#"
         INSERT INTO promotions (
             name, discount_type, discount_value, max_discount, min_order_amount,
-            quota_type, quota_limit, start_date, end_date, regular_only,
+            quota_limit, used_count, start_date, end_date, regular_only,
             receipt_promo_text, receipt_media_type, receipt_media_value,
             is_active, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, 1, ?, ?)
         "#,
     )
     .bind(&v.name)
@@ -370,7 +293,6 @@ pub async fn create_promotion(
     .bind(v.discount_value)
     .bind(v.max_discount)
     .bind(v.min_order_amount)
-    .bind(v.quota_type)
     .bind(v.quota_limit)
     .bind(&v.start_date)
     .bind(&v.end_date)
@@ -394,12 +316,12 @@ pub async fn create_promotion(
         actor = %auth.username,
         promo_id = id,
         discount_type = v.discount_type,
-        quota_type = v.quota_type,
+        quota_limit = v.quota_limit,
         media_type = v.receipt_media_type,
         "promotion created"
     );
 
-    Ok((StatusCode::CREATED, Json(PromotionResponse::from_row(row, 0, 0))))
+    Ok((StatusCode::CREATED, Json(PromotionResponse::from(row))))
 }
 
 pub async fn update_promotion(
@@ -416,7 +338,6 @@ pub async fn update_promotion(
         req.discount_value,
         req.max_discount,
         req.min_order_amount,
-        &req.quota_type,
         req.quota_limit,
         req.start_date.as_deref(),
         req.end_date.as_deref(),
@@ -430,19 +351,24 @@ pub async fn update_promotion(
     let is_active_int: i64 = if req.is_active { 1 } else { 0 };
     let mut tx = begin_write_tx(&state.pool).await?;
 
-    let exists: Option<(i64,)> = sqlx::query_as("SELECT id FROM promotions WHERE id = ?")
+    let existing: PromotionRow = sqlx::query_as("SELECT * FROM promotions WHERE id = ?")
         .bind(id)
         .fetch_optional(&mut *tx)
-        .await?;
-    if exists.is_none() {
-        return Err(AppError::NotFound(format!("Promo #{id} tidak ditemukan")));
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("Promo #{id} tidak ditemukan")))?;
+
+    if v.quota_limit < existing.used_count {
+        return Err(AppError::Conflict(format!(
+            "Kuota ({}) tidak boleh lebih kecil dari jumlah yang sudah terpakai ({}).",
+            v.quota_limit, existing.used_count
+        )));
     }
 
     sqlx::query(
         r#"
         UPDATE promotions
         SET name = ?, discount_type = ?, discount_value = ?, max_discount = ?,
-            min_order_amount = ?, quota_type = ?, quota_limit = ?,
+            min_order_amount = ?, quota_limit = ?,
             start_date = ?, end_date = ?, regular_only = ?,
             receipt_promo_text = ?, receipt_media_type = ?, receipt_media_value = ?,
             is_active = ?, updated_at = ?
@@ -454,7 +380,6 @@ pub async fn update_promotion(
     .bind(v.discount_value)
     .bind(v.max_discount)
     .bind(v.min_order_amount)
-    .bind(v.quota_type)
     .bind(v.quota_limit)
     .bind(&v.start_date)
     .bind(&v.end_date)
@@ -474,9 +399,15 @@ pub async fn update_promotion(
         .await?;
     tx.commit().await?;
 
-    let today = today_date();
-    let hydrated = hydrate_promotion_response(&state.pool, row, &today).await?;
-    Ok(Json(hydrated))
+    tracing::info!(
+        actor = %auth.username,
+        promo_id = id,
+        quota_limit = v.quota_limit,
+        is_active = req.is_active,
+        "promotion updated"
+    );
+
+    Ok(Json(PromotionResponse::from(row)))
 }
 
 pub async fn delete_promotion(
@@ -497,7 +428,7 @@ pub async fn delete_promotion(
     }
 
     let (ref_count,): (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM orders WHERE promo_id = ?")
+        sqlx::query_as("SELECT COUNT(*) FROM applied_promotions WHERE promo_id = ?")
             .bind(id)
             .fetch_one(&mut *tx)
             .await?;
@@ -509,6 +440,7 @@ pub async fn delete_promotion(
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
+        tracing::info!(actor = %auth.username, promo_id = id, ref_count, "promotion soft-archived");
         return Ok(Json(json!({
             "deleted": false,
             "soft_deleted": true,
@@ -521,5 +453,6 @@ pub async fn delete_promotion(
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
+    tracing::info!(actor = %auth.username, promo_id = id, "promotion deleted");
     Ok(Json(json!({ "deleted": true, "soft_deleted": false })))
 }

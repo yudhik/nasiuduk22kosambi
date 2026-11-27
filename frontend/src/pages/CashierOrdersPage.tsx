@@ -572,10 +572,13 @@ export function CashierOrdersPage({
                     </p>
                   )}
 
-                  {order.promo_id !== null && (
+                  {order.applied_promotions.length > 0 && (
                     <div className="mt-2 flex items-center justify-between gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 text-[11px] text-emerald-800">
                       <div className="min-w-0">
-                        <span className="font-bold">Promo: {order.promo_name}</span>
+                        <span className="font-bold">
+                          Promo:{' '}
+                          {order.applied_promotions.map((ap) => ap.promo_name_snapshot).join(', ')}
+                        </span>
                         <span className="ml-1.5 font-extrabold">
                           (-{formatRupiah(order.discount_amount)})
                         </span>
@@ -616,7 +619,7 @@ export function CashierOrdersPage({
                       className="inline-flex h-10 items-center justify-center gap-1.5 rounded-xl border border-brand-amber bg-brand-cream px-3 text-xs font-bold text-brand-brown hover:bg-brand-cream-deep disabled:opacity-60"
                     >
                       <Percent className="h-3.5 w-3.5 text-brand-orange" />
-                      <span>{order.promo_id ? 'Ganti Promo' : 'Promo'}</span>
+                      <span>{order.applied_promotions.length > 0 ? 'Ganti Promo' : 'Promo'}</span>
                     </button>
                   )}
                   {order.status === 'UNPAID' && !isTodayClosed && (
@@ -690,8 +693,10 @@ export function CashierOrdersPage({
           ) : (
             activePromos.map((p) => {
               const subtotal = promoTarget?.subtotal_amount ?? 0;
-              const isApplied = promoTarget?.promo_id === p.id;
-              const exhausted = p.remaining_quota !== null && p.remaining_quota <= 0 && !isApplied;
+              const isApplied = Boolean(
+                promoTarget?.applied_promotions.some((ap) => ap.promo_id === p.id)
+              );
+              const exhausted = p.remaining_quota <= 0 && !isApplied;
               const belowMin = subtotal < p.min_order_amount;
               const wrongChannel =
                 p.regular_only &&
@@ -726,11 +731,9 @@ export function CashierOrdersPage({
                     <div className="flex flex-wrap items-center gap-1.5">
                       <Tag className="h-3.5 w-3.5 text-brand-orange" />
                       <span className="text-sm font-bold text-brand-brown">{p.name}</span>
-                      {p.remaining_quota !== null && (
-                        <span className="rounded-full bg-brand-cream-deep px-2 py-0.5 text-[10px] font-bold text-brand-brown">
-                          Sisa {p.remaining_quota}/{p.quota_limit}
-                        </span>
-                      )}
+                      <span className="rounded-full bg-brand-cream-deep px-2 py-0.5 text-[10px] font-bold text-brand-brown">
+                        Sisa {p.remaining_quota}/{p.quota_limit}
+                      </span>
                     </div>
                     <p className="mt-0.5 text-[11px] text-brand-brown/70">
                       {exhausted

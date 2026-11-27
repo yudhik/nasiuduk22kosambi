@@ -152,7 +152,6 @@ export interface OrderItemDetail {
 export type OrderStatus = 'UNPAID' | 'PAID' | 'VOIDED';
 
 export type PromoDiscountType = 'FIXED' | 'PERCENT';
-export type PromoQuotaType = 'UNLIMITED' | 'TOTAL' | 'DAILY';
 export type PromoReceiptMediaType = 'NONE' | 'QR' | 'BARCODE';
 
 export interface Promotion {
@@ -162,11 +161,9 @@ export interface Promotion {
   discount_value: number;
   max_discount: number | null;
   min_order_amount: number;
-  quota_type: PromoQuotaType;
-  quota_limit: number | null;
-  used_total: number;
-  used_today: number;
-  remaining_quota: number | null;
+  quota_limit: number;
+  used_count: number;
+  remaining_quota: number;
   start_date: string | null;
   end_date: string | null;
   regular_only: boolean;
@@ -184,8 +181,7 @@ export interface UpsertPromotionPayload {
   discount_value: number;
   max_discount?: number | null;
   min_order_amount: number;
-  quota_type: PromoQuotaType;
-  quota_limit?: number | null;
+  quota_limit: number;
   start_date?: string | null;
   end_date?: string | null;
   regular_only: boolean;
@@ -193,6 +189,20 @@ export interface UpsertPromotionPayload {
   receipt_media_type: PromoReceiptMediaType;
   receipt_media_value: string;
   is_active?: boolean;
+}
+
+export interface AppliedPromotionDetail {
+  id: number;
+  order_id: number;
+  promo_id: number;
+  promo_name_snapshot: string;
+  discount_amount: number;
+  applied_by_username: string;
+  receipt_text_snapshot: string;
+  receipt_media_type: PromoReceiptMediaType;
+  receipt_media_value: string;
+  status: string;
+  created_at: string;
 }
 
 export interface OrderDetail {
@@ -209,12 +219,7 @@ export interface OrderDetail {
   subtotal_amount: number;
   discount_amount: number;
   total_amount: number;
-  promo_id: number | null;
-  promo_name: string;
-  promo_applied_by_username: string;
-  promo_receipt_text: string;
-  promo_receipt_media_type: PromoReceiptMediaType;
-  promo_receipt_media_value: string;
+  applied_promotions: AppliedPromotionDetail[];
   created_at: string;
   paid_at: string | null;
   voided_at: string | null;

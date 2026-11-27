@@ -298,8 +298,8 @@ pub struct PromotionRow {
     pub discount_value: i64,
     pub max_discount: Option<i64>,
     pub min_order_amount: i64,
-    pub quota_type: String,
-    pub quota_limit: Option<i64>,
+    pub quota_limit: i64,
+    pub used_count: i64,
     pub start_date: Option<String>,
     pub end_date: Option<String>,
     pub regular_only: i64,
@@ -319,11 +319,9 @@ pub struct PromotionResponse {
     pub discount_value: i64,
     pub max_discount: Option<i64>,
     pub min_order_amount: i64,
-    pub quota_type: String,
-    pub quota_limit: Option<i64>,
-    pub used_total: i64,
-    pub used_today: i64,
-    pub remaining_quota: Option<i64>,
+    pub quota_limit: i64,
+    pub used_count: i64,
+    pub remaining_quota: i64,
     pub start_date: Option<String>,
     pub end_date: Option<String>,
     pub regular_only: bool,
@@ -335,13 +333,9 @@ pub struct PromotionResponse {
     pub updated_at: String,
 }
 
-impl PromotionResponse {
-    pub fn from_row(row: PromotionRow, used_total: i64, used_today: i64) -> Self {
-        let remaining_quota = match (row.quota_type.as_str(), row.quota_limit) {
-            ("TOTAL", Some(limit)) => Some((limit - used_total).max(0)),
-            ("DAILY", Some(limit)) => Some((limit - used_today).max(0)),
-            _ => None,
-        };
+impl From<PromotionRow> for PromotionResponse {
+    fn from(row: PromotionRow) -> Self {
+        let remaining_quota = row.quota_limit.saturating_sub(row.used_count);
         Self {
             id: row.id,
             name: row.name,
@@ -349,10 +343,8 @@ impl PromotionResponse {
             discount_value: row.discount_value,
             max_discount: row.max_discount,
             min_order_amount: row.min_order_amount,
-            quota_type: row.quota_type,
             quota_limit: row.quota_limit,
-            used_total,
-            used_today,
+            used_count: row.used_count,
             remaining_quota,
             start_date: row.start_date,
             end_date: row.end_date,
@@ -374,8 +366,7 @@ pub struct CreatePromotionRequest {
     pub discount_value: i64,
     pub max_discount: Option<i64>,
     pub min_order_amount: Option<i64>,
-    pub quota_type: Option<String>,
-    pub quota_limit: Option<i64>,
+    pub quota_limit: i64,
     pub start_date: Option<String>,
     pub end_date: Option<String>,
     pub regular_only: Option<bool>,
@@ -391,8 +382,7 @@ pub struct UpdatePromotionRequest {
     pub discount_value: i64,
     pub max_discount: Option<i64>,
     pub min_order_amount: i64,
-    pub quota_type: String,
-    pub quota_limit: Option<i64>,
+    pub quota_limit: i64,
     pub start_date: Option<String>,
     pub end_date: Option<String>,
     pub regular_only: bool,
@@ -405,6 +395,21 @@ pub struct UpdatePromotionRequest {
 #[derive(Debug, Deserialize)]
 pub struct ApplyOrderPromoRequest {
     pub promo_id: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct AppliedPromotionDetail {
+    pub id: i64,
+    pub order_id: i64,
+    pub promo_id: i64,
+    pub promo_name_snapshot: String,
+    pub discount_amount: i64,
+    pub applied_by_username: String,
+    pub receipt_text_snapshot: String,
+    pub receipt_media_type: String,
+    pub receipt_media_value: String,
+    pub status: String,
+    pub created_at: String,
 }
 
 // ===== Orders (Nota Digital) =====
@@ -456,12 +461,6 @@ pub struct OrderRow {
     pub subtotal_amount: i64,
     pub discount_amount: i64,
     pub total_amount: i64,
-    pub promo_id: Option<i64>,
-    pub promo_name_snapshot: String,
-    pub promo_applied_by_username: String,
-    pub promo_receipt_text_snapshot: String,
-    pub promo_receipt_media_type: String,
-    pub promo_receipt_media_value: String,
     pub created_at: String,
     pub paid_at: Option<String>,
     pub voided_at: Option<String>,
@@ -483,12 +482,7 @@ pub struct OrderDetail {
     pub subtotal_amount: i64,
     pub discount_amount: i64,
     pub total_amount: i64,
-    pub promo_id: Option<i64>,
-    pub promo_name: String,
-    pub promo_applied_by_username: String,
-    pub promo_receipt_text: String,
-    pub promo_receipt_media_type: String,
-    pub promo_receipt_media_value: String,
+    pub applied_promotions: Vec<AppliedPromotionDetail>,
     pub created_at: String,
     pub paid_at: Option<String>,
     pub voided_at: Option<String>,
@@ -497,7 +491,11 @@ pub struct OrderDetail {
 }
 
 impl OrderDetail {
-    pub fn from_parts(order: OrderRow, items: Vec<OrderItemDetail>) -> Self {
+    pub fn from_parts(
+        order: OrderRow,
+        items: Vec<OrderItemDetail>,
+        applied_promotions: Vec<AppliedPromotionDetail>,
+    ) -> Self {
         Self {
             id: order.id,
             order_number: order.order_number,
@@ -512,12 +510,7 @@ impl OrderDetail {
             subtotal_amount: order.subtotal_amount,
             discount_amount: order.discount_amount,
             total_amount: order.total_amount,
-            promo_id: order.promo_id,
-            promo_name: order.promo_name_snapshot,
-            promo_applied_by_username: order.promo_applied_by_username,
-            promo_receipt_text: order.promo_receipt_text_snapshot,
-            promo_receipt_media_type: order.promo_receipt_media_type,
-            promo_receipt_media_value: order.promo_receipt_media_value,
+            applied_promotions,
             created_at: order.created_at,
             paid_at: order.paid_at,
             voided_at: order.voided_at,

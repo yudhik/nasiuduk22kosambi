@@ -1867,18 +1867,19 @@ async fn test_quota_promotions_and_receipt_promo_section() {
         Some(json!({
             "name": "Hack Promo",
             "discount_type": "FIXED",
-            "discount_value": 5000
+            "discount_value": 5000,
+            "quota_limit": 10
         })),
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 
-    // 2. Validation checks: invalid media value for QR/BARCODE, missing quota_limit for TOTAL
+    // 2. Validation checks: invalid media value for QR/BARCODE (including '{'), quota_limit <= 0, pct > 100
     for bad in [
-        json!({ "name": "No QR", "discount_type": "FIXED", "discount_value": 5000, "receipt_media_type": "QR", "receipt_media_value": "" }),
-        json!({ "name": "Bad Barcode", "discount_type": "FIXED", "discount_value": 5000, "receipt_media_type": "BARCODE", "receipt_media_value": "NON-ASCII-\u{2603}" }),
-        json!({ "name": "No Quota", "discount_type": "FIXED", "discount_value": 5000, "quota_type": "TOTAL" }),
-        json!({ "name": "Bad Pct", "discount_type": "PERCENT", "discount_value": 101 }),
+        json!({ "name": "No QR", "discount_type": "FIXED", "discount_value": 5000, "quota_limit": 10, "receipt_media_type": "QR", "receipt_media_value": "" }),
+        json!({ "name": "Bad Barcode", "discount_type": "FIXED", "discount_value": 5000, "quota_limit": 10, "receipt_media_type": "BARCODE", "receipt_media_value": "BAD{B123" }),
+        json!({ "name": "Zero Quota", "discount_type": "FIXED", "discount_value": 5000, "quota_limit": 0 }),
+        json!({ "name": "Bad Pct", "discount_type": "PERCENT", "discount_value": 101, "quota_limit": 10 }),
     ] {
         let (status, _, _) = send_json_with_cookie(
             &app,
@@ -1902,7 +1903,6 @@ async fn test_quota_promotions_and_receipt_promo_section() {
             "discount_type": "FIXED",
             "discount_value": 5000,
             "min_order_amount": 20000,
-            "quota_type": "TOTAL",
             "quota_limit": 1,
             "regular_only": true,
             "receipt_promo_text": "Scan QR untuk ulasan jujur di Google Maps!",
@@ -1913,7 +1913,9 @@ async fn test_quota_promotions_and_receipt_promo_section() {
     .await;
     assert_eq!(status, StatusCode::CREATED);
     let promo: PromotionResponse = serde_json::from_value(promo_val).unwrap();
-    assert_eq!(promo.remaining_quota, Some(1));
+    assert_eq!(promo.quota_limit, 1);
+    assert_eq!(promo.used_count, 0);
+    assert_eq!(promo.remaining_quota, 1);
     assert_eq!(promo.receipt_media_type, "QR");
 
     let (status, pct_val, _) = send_json_with_cookie(
@@ -1927,7 +1929,6 @@ async fn test_quota_promotions_and_receipt_promo_section() {
             "discount_value": 20,
             "max_discount": 6000,
             "min_order_amount": 0,
-            "quota_type": "DAILY",
             "quota_limit": 5,
             "regular_only": true,
             "receipt_promo_text": "Simpan struk ini untuk kunjungan berikutnya",
@@ -2023,9 +2024,13 @@ async fn test_quota_promotions_and_receipt_promo_section() {
     assert_eq!(applied.subtotal_amount, 36000);
     assert_eq!(applied.discount_amount, 5000);
     assert_eq!(applied.total_amount, 31000);
-    assert_eq!(applied.promo_id, Some(promo.id));
-    assert_eq!(applied.promo_receipt_media_type, "QR");
-    assert_eq!(applied.promo_receipt_media_value, "https://g.page/r/test/review");
+    assert_eq!(applied.applied_promotions.len(), 1);
+    assert_eq!(applied.applied_promotions[0].promo_id, promo.id);
+    assert_eq!(applied.applied_promotions[0].receipt_media_type, "QR");
+    assert_eq!(
+        applied.applied_promotions[0].receipt_media_value,
+        "https://g.page/r/test/review"
+    );
 
     // Applying same quota=1 promo to order_b must fail (409 Conflict: quota exhausted!)
     let (status, _, _) = send_json_with_cookie(
@@ -2051,8 +2056,7 @@ async fn test_quota_promotions_and_receipt_promo_section() {
     let removed: OrderDetail = serde_json::from_value(removed_val).unwrap();
     assert_eq!(removed.discount_amount, 0);
     assert_eq!(removed.total_amount, 36000);
-    assert_eq!(removed.promo_id, None);
-    assert_eq!(removed.promo_receipt_media_type, "NONE");
+    assert!(removed.applied_promotions.is_empty());
 
     let (status, _, _) = send_json_with_cookie(
         &app,
@@ -2077,7 +2081,8 @@ async fn test_quota_promotions_and_receipt_promo_section() {
     let pct_applied: OrderDetail = serde_json::from_value(pct_applied_val).unwrap();
     assert_eq!(pct_applied.discount_amount, 6000);
     assert_eq!(pct_applied.total_amount, 30000);
-    assert_eq!(pct_applied.promo_receipt_media_type, "BARCODE");
+    assert_eq!(pct_applied.applied_promotions.len(), 1);
+    assert_eq!(pct_applied.applied_promotions[0].receipt_media_type, "BARCODE");
 
     // Pay both orders; once PAID, promo cannot be removed (409)
     for oid in [order_a.id, order_b.id] {
@@ -2115,6 +2120,47 @@ async fn test_quota_promotions_and_receipt_promo_section() {
     assert_eq!(rep.revenue.paid_total, 61000);
     assert_eq!(rep.revenue.total_discounts, 11000);
     assert_eq!(rep.promo_summary.len(), 2);
+
+    // Updating quota_limit below used_count (used_count == 1) is rejected (409 Conflict)
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::PUT,
+        &format!("/api/promotions/{}", pct_promo.id),
+        Some(&admin_cookie),
+        Some(json!({
+            "name": "Diskon 20% Maks 6rb",
+            "discount_type": "PERCENT",
+            "discount_value": 20,
+            "max_discount": 6000,
+            "min_order_amount": 0,
+            "quota_limit": 1,
+            "regular_only": true,
+            "receipt_promo_text": "Simpan struk ini",
+            "receipt_media_type": "BARCODE",
+            "receipt_media_value": "ND22-VOUCHER-01",
+            "is_active": true
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Voiding order_a (PAID) restores pct_promo.used_count back to 0
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        &format!("/api/orders/{}/void", order_a.id),
+        Some(&admin_cookie),
+        Some(json!({ "reason": "Tes void promo" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (used_after_void,): (i64,) =
+        sqlx::query_as("SELECT used_count FROM promotions WHERE id = ?")
+            .bind(pct_promo.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(used_after_void, 0);
 
     // Deleting a used promo soft-archives it instead of breaking FK
     let (status, del_val, _) = send_json_with_cookie(

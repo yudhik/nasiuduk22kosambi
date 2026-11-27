@@ -184,7 +184,12 @@ export function ReceiptPrintView({ order, receiptSettings, onClose }: ReceiptPri
                   <span>{formatRupiah(order.subtotal_amount)}</span>
                 </div>
                 <div className="flex justify-between text-emerald-700">
-                  <span>Diskon ({order.promo_name || 'Promo'})</span>
+                  <span>
+                    Diskon (
+                    {order.applied_promotions.map((ap) => ap.promo_name_snapshot).join(', ') ||
+                      'Promo'}
+                    )
+                  </span>
                   <span className="font-semibold">-{formatRupiah(order.discount_amount)}</span>
                 </div>
               </div>
@@ -214,34 +219,38 @@ export function ReceiptPrintView({ order, receiptSettings, onClose }: ReceiptPri
               </div>
             )}
 
-            {order.promo_id !== null &&
-              (order.promo_receipt_text?.trim() ||
-                (order.promo_receipt_media_type !== 'NONE' &&
-                  order.promo_receipt_media_value?.trim())) && (
-                <div className="mt-3 space-y-2 border-t border-dashed border-slate-400 pt-2.5 text-center text-[10px] text-slate-700">
-                  {order.promo_receipt_text?.trim() && (
-                    <p className="whitespace-pre-line">{order.promo_receipt_text.trim()}</p>
+            {order.applied_promotions
+              .filter(
+                (ap) =>
+                  ap.receipt_text_snapshot?.trim() ||
+                  (ap.receipt_media_type !== 'NONE' && ap.receipt_media_value?.trim())
+              )
+              .map((ap) => (
+                <div
+                  key={ap.id}
+                  className="mt-3 space-y-2 border-t border-dashed border-slate-400 pt-2.5 text-center text-[10px] text-slate-700"
+                >
+                  {ap.receipt_text_snapshot?.trim() && (
+                    <p className="whitespace-pre-line">{ap.receipt_text_snapshot.trim()}</p>
                   )}
-                  {order.promo_receipt_media_type === 'QR' &&
-                    order.promo_receipt_media_value?.trim() && (
-                      <div className="mx-auto rounded-lg border border-dashed border-slate-400 bg-slate-50 px-2.5 py-2 text-[10px]">
-                        <p className="font-bold uppercase text-slate-800">[QR Code 58mm]</p>
-                        <p className="mt-0.5 break-all text-[9px] text-slate-500">
-                          {order.promo_receipt_media_value}
-                        </p>
-                      </div>
-                    )}
-                  {order.promo_receipt_media_type === 'BARCODE' &&
-                    order.promo_receipt_media_value?.trim() && (
-                      <div className="mx-auto rounded-lg border border-dashed border-slate-400 bg-slate-50 px-2.5 py-2 text-[10px]">
-                        <p className="font-bold uppercase text-slate-800">[Barcode CODE128]</p>
-                        <p className="mt-0.5 font-mono text-[11px] font-bold tracking-widest text-slate-900">
-                          {order.promo_receipt_media_value}
-                        </p>
-                      </div>
-                    )}
+                  {ap.receipt_media_type === 'QR' && ap.receipt_media_value?.trim() && (
+                    <div className="mx-auto rounded-lg border border-dashed border-slate-400 bg-slate-50 px-2.5 py-2 text-[10px]">
+                      <p className="font-bold uppercase text-slate-800">[QR Code 58mm]</p>
+                      <p className="mt-0.5 break-all text-[9px] text-slate-500">
+                        {ap.receipt_media_value}
+                      </p>
+                    </div>
+                  )}
+                  {ap.receipt_media_type === 'BARCODE' && ap.receipt_media_value?.trim() && (
+                    <div className="mx-auto rounded-lg border border-dashed border-slate-400 bg-slate-50 px-2.5 py-2 text-[10px]">
+                      <p className="font-bold uppercase text-slate-800">[Barcode CODE128]</p>
+                      <p className="mt-0.5 font-mono text-[11px] font-bold tracking-widest text-slate-900">
+                        {ap.receipt_media_value}
+                      </p>
+                    </div>
+                  )}
                 </div>
-              )}
+              ))}
           </div>
         </div>
 

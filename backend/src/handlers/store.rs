@@ -497,12 +497,6 @@ struct BackupOrderRow {
     subtotal_amount: i64,
     discount_amount: i64,
     total_amount: i64,
-    promo_id: Option<i64>,
-    promo_name_snapshot: String,
-    promo_applied_by_username: String,
-    promo_receipt_text_snapshot: String,
-    promo_receipt_media_type: String,
-    promo_receipt_media_value: String,
     created_at: String,
     paid_at: Option<String>,
     voided_at: Option<String>,
@@ -510,6 +504,21 @@ struct BackupOrderRow {
     channel_id: Option<i64>,
     channel_name_snapshot: String,
     created_by_user_id: Option<i64>,
+}
+
+#[derive(FromRow)]
+struct BackupAppliedPromotionRow {
+    id: i64,
+    order_id: i64,
+    promo_id: i64,
+    promo_name_snapshot: String,
+    discount_amount: i64,
+    applied_by_username: String,
+    receipt_text_snapshot: String,
+    receipt_media_type: String,
+    receipt_media_value: String,
+    status: String,
+    created_at: String,
 }
 
 #[derive(FromRow)]
@@ -721,13 +730,26 @@ pub async fn reset_store_day(
         r#"
         SELECT id, order_number, business_date, customer_label, waiter_name, notes,
                status, subtotal_amount, discount_amount, total_amount,
-               promo_id, promo_name_snapshot, promo_applied_by_username,
-               promo_receipt_text_snapshot, promo_receipt_media_type, promo_receipt_media_value,
                created_at, paid_at, voided_at, void_reason,
                channel_id, channel_name_snapshot, created_by_user_id
         FROM orders
         WHERE business_date = ?
         ORDER BY id ASC
+        "#,
+    )
+    .bind(&today)
+    .fetch_all(&mut *tx)
+    .await?;
+
+    let applied_promotions: Vec<BackupAppliedPromotionRow> = sqlx::query_as(
+        r#"
+        SELECT ap.id, ap.order_id, ap.promo_id, ap.promo_name_snapshot, ap.discount_amount,
+               ap.applied_by_username, ap.receipt_text_snapshot, ap.receipt_media_type,
+               ap.receipt_media_value, ap.status, ap.created_at
+        FROM applied_promotions ap
+        INNER JOIN orders o ON o.id = ap.order_id
+        WHERE o.business_date = ?
+        ORDER BY ap.id ASC
         "#,
     )
     .bind(&today)
@@ -881,7 +903,7 @@ pub async fn reset_store_day(
     for o in &orders {
         let _ = writeln!(
             sql,
-            "INSERT INTO orders (id, order_number, business_date, customer_label, waiter_name, notes, status, subtotal_amount, discount_amount, total_amount, promo_id, promo_name_snapshot, promo_applied_by_username, promo_receipt_text_snapshot, promo_receipt_media_type, promo_receipt_media_value, created_at, paid_at, voided_at, void_reason, channel_id, channel_name_snapshot, created_by_user_id) VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {});",
+            "INSERT INTO orders (id, order_number, business_date, customer_label, waiter_name, notes, status, subtotal_amount, discount_amount, total_amount, created_at, paid_at, voided_at, void_reason, channel_id, channel_name_snapshot, created_by_user_id) VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {});",
             o.id,
             sql_text(&o.order_number),
             sql_text(&o.business_date),
@@ -892,12 +914,6 @@ pub async fn reset_store_day(
             o.subtotal_amount,
             o.discount_amount,
             o.total_amount,
-            sql_opt_i64(o.promo_id),
-            sql_text(&o.promo_name_snapshot),
-            sql_text(&o.promo_applied_by_username),
-            sql_text(&o.promo_receipt_text_snapshot),
-            sql_text(&o.promo_receipt_media_type),
-            sql_text(&o.promo_receipt_media_value),
             sql_text(&o.created_at),
             sql_opt_text(o.paid_at.as_deref()),
             sql_opt_text(o.voided_at.as_deref()),
@@ -906,6 +922,31 @@ pub async fn reset_store_day(
             sql_text(&o.channel_name_snapshot),
             sql_opt_i64(o.created_by_user_id),
         );
+    }
+
+    for ap in &applied_promotions {
+        let _ = writeln!(
+            sql,
+            "INSERT INTO applied_promotions (id, order_id, promo_id, promo_name_snapshot, discount_amount, applied_by_username, receipt_text_snapshot, receipt_media_type, receipt_media_value, status, created_at) VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {});",
+            ap.id,
+            ap.order_id,
+            ap.promo_id,
+            sql_text(&ap.promo_name_snapshot),
+            ap.discount_amount,
+            sql_text(&ap.applied_by_username),
+            sql_text(&ap.receipt_text_snapshot),
+            sql_text(&ap.receipt_media_type),
+            sql_text(&ap.receipt_media_value),
+            sql_text(&ap.status),
+            sql_text(&ap.created_at),
+        );
+        if ap.status == "APPLIED" {
+            let _ = writeln!(
+                sql,
+                "UPDATE promotions SET used_count = MIN(quota_limit, used_count + 1) WHERE id = {};",
+                ap.promo_id
+            );
+        }
     }
 
     for oi in &order_items {
@@ -1058,6 +1099,24 @@ pub async fn reset_store_day(
     .await?;
     sqlx::query(
         "DELETE FROM order_items WHERE order_id IN (SELECT id FROM orders WHERE business_date = ?)",
+    )
+    .bind(&today)
+    .execute(&mut *tx)
+    .await?;
+    // Release promotion quota counts for today's APPLIED promotions before deleting orders
+    for ap in &applied_promotions {
+        if ap.status == "APPLIED" {
+            sqlx::query(
+                "UPDATE promotions SET used_count = MAX(0, used_count - 1), updated_at = ? WHERE id = ?",
+            )
+            .bind(&now_iso)
+            .bind(ap.promo_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
+    sqlx::query(
+        "DELETE FROM applied_promotions WHERE order_id IN (SELECT id FROM orders WHERE business_date = ?)",
     )
     .bind(&today)
     .execute(&mut *tx)

@@ -16,8 +16,9 @@ use crate::{
     },
     error::{AppError, AppResult},
     models::{
-        ApplyOrderPromoRequest, CreateOrderRequest, MenuItemRow, OrderDetail, OrderItemDetail,
-        OrderRow, PromotionRow, SalesChannel, StockItem, VoidOrderRequest,
+        AppliedPromotionDetail, ApplyOrderPromoRequest, CreateOrderRequest, MenuItemRow,
+        OrderDetail, OrderItemDetail, OrderRow, PromotionRow, SalesChannel, StockItem,
+        VoidOrderRequest,
     },
     AppState,
 };
@@ -391,7 +392,7 @@ pub async fn create_order(
     tx.commit().await?;
     Ok((
         StatusCode::CREATED,
-        Json(OrderDetail::from_parts(order_row, order_items)),
+        Json(OrderDetail::from_parts(order_row, order_items, Vec::new())),
     ))
 }
 
@@ -510,16 +511,35 @@ pub async fn list_orders(
         return Ok(Json(Vec::new()));
     }
 
+    let all_applied_promos: Vec<AppliedPromotionDetail> = sqlx::query_as(
+        r#"
+        SELECT ap.*
+        FROM applied_promotions ap
+        INNER JOIN orders o ON o.id = ap.order_id
+        WHERE o.business_date = ? AND ap.status = 'APPLIED'
+        ORDER BY ap.id ASC
+        "#,
+    )
+    .bind(&business_date)
+    .fetch_all(&state.pool)
+    .await?;
+
     let mut items_by_order: HashMap<i64, Vec<OrderItemDetail>> = HashMap::new();
     for item in all_items {
         items_by_order.entry(item.order_id).or_default().push(item);
+    }
+
+    let mut promos_by_order: HashMap<i64, Vec<AppliedPromotionDetail>> = HashMap::new();
+    for ap in all_applied_promos {
+        promos_by_order.entry(ap.order_id).or_default().push(ap);
     }
 
     let details = orders
         .into_iter()
         .map(|o| {
             let items = items_by_order.remove(&o.id).unwrap_or_default();
-            OrderDetail::from_parts(o, items)
+            let promos = promos_by_order.remove(&o.id).unwrap_or_default();
+            OrderDetail::from_parts(o, items, promos)
         })
         .collect();
 
@@ -532,19 +552,27 @@ pub async fn get_order(
     Path(id): Path<i64>,
 ) -> AppResult<Json<OrderDetail>> {
     auth.require_roles(&[Role::Cashier, Role::Owner, Role::Admin])?;
+    let mut tx = state.pool.begin().await?;
     let order: Option<OrderRow> = sqlx::query_as("SELECT * FROM orders WHERE id = ?")
         .bind(id)
-        .fetch_optional(&state.pool)
+        .fetch_optional(&mut *tx)
         .await?;
 
     let order = order.ok_or_else(|| AppError::NotFound(format!("Nota #{id} tidak ditemukan")))?;
     let items: Vec<OrderItemDetail> =
         sqlx::query_as("SELECT * FROM order_items WHERE order_id = ? ORDER BY id ASC")
             .bind(id)
-            .fetch_all(&state.pool)
+            .fetch_all(&mut *tx)
             .await?;
+    let applied_promos: Vec<AppliedPromotionDetail> = sqlx::query_as(
+        "SELECT * FROM applied_promotions WHERE order_id = ? AND status = 'APPLIED' ORDER BY id ASC",
+    )
+    .bind(id)
+    .fetch_all(&mut *tx)
+    .await?;
+    tx.commit().await?;
 
-    Ok(Json(OrderDetail::from_parts(order, items)))
+    Ok(Json(OrderDetail::from_parts(order, items, applied_promos)))
 }
 
 pub async fn pay_order(
@@ -596,9 +624,15 @@ pub async fn pay_order(
             .bind(id)
             .fetch_all(&mut *tx)
             .await?;
+    let applied_promos: Vec<AppliedPromotionDetail> = sqlx::query_as(
+        "SELECT * FROM applied_promotions WHERE order_id = ? AND status = 'APPLIED' ORDER BY id ASC",
+    )
+    .bind(id)
+    .fetch_all(&mut *tx)
+    .await?;
 
     tx.commit().await?;
-    Ok(Json(OrderDetail::from_parts(updated, items)))
+    Ok(Json(OrderDetail::from_parts(updated, items, applied_promos)))
 }
 
 pub async fn apply_order_promo(
@@ -608,6 +642,7 @@ pub async fn apply_order_promo(
     Json(req): Json<ApplyOrderPromoRequest>,
 ) -> AppResult<Json<OrderDetail>> {
     auth.require_roles(&[Role::Cashier, Role::Owner, Role::Admin])?;
+    let (_today, now) = now_business_and_iso();
     let mut tx = begin_write_tx(&state.pool).await?;
 
     let order: OrderRow = sqlx::query_as("SELECT * FROM orders WHERE id = ?")
@@ -626,6 +661,29 @@ pub async fn apply_order_promo(
         return Err(AppError::Conflict(
             "Promo hanya dapat diterapkan pada nota yang BELUM BAYAR.".into(),
         ));
+    }
+
+    // Release any previously applied promo on this UNPAID order first (so switching or re-applying is atomic)
+    let prev_promos: Vec<(i64,)> = sqlx::query_as(
+        "SELECT promo_id FROM applied_promotions WHERE order_id = ? AND status = 'APPLIED'",
+    )
+    .bind(order.id)
+    .fetch_all(&mut *tx)
+    .await?;
+    if !prev_promos.is_empty() {
+        sqlx::query("DELETE FROM applied_promotions WHERE order_id = ? AND status = 'APPLIED'")
+            .bind(order.id)
+            .execute(&mut *tx)
+            .await?;
+        for (old_pid,) in prev_promos {
+            sqlx::query(
+                "UPDATE promotions SET used_count = MAX(0, used_count - 1), updated_at = ? WHERE id = ?",
+            )
+            .bind(&now)
+            .bind(old_pid)
+            .execute(&mut *tx)
+            .await?;
+        }
     }
 
     let promo: PromotionRow = sqlx::query_as("SELECT * FROM promotions WHERE id = ?")
@@ -680,45 +738,20 @@ pub async fn apply_order_promo(
         )));
     }
 
-    // Atomic quota enforcement (excluding VOIDED orders and excluding current order if re-applying)
-    match (promo.quota_type.as_str(), promo.quota_limit) {
-        ("TOTAL", Some(limit)) => {
-            let (used,): (i64,) = sqlx::query_as(
-                "SELECT COUNT(*) FROM orders WHERE promo_id = ? AND status != 'VOIDED' AND id != ?",
-            )
-            .bind(promo.id)
-            .bind(order.id)
-            .fetch_one(&mut *tx)
-            .await?;
-            if used >= limit {
-                return Err(AppError::Conflict(format!(
-                    "Kuota promo \"{}\" sudah habis ({used}/{limit}).",
-                    promo.name
-                )));
-            }
-        }
-        ("DAILY", Some(limit)) => {
-            let (used,): (i64,) = sqlx::query_as(
-                "SELECT COUNT(*) FROM orders WHERE promo_id = ? AND business_date = ? AND status != 'VOIDED' AND id != ?",
-            )
-            .bind(promo.id)
-            .bind(&order.business_date)
-            .bind(order.id)
-            .fetch_one(&mut *tx)
-            .await?;
-            if used >= limit {
-                return Err(AppError::Conflict(format!(
-                    "Kuota harian promo \"{}\" sudah habis ({used}/{limit}).",
-                    promo.name
-                )));
-            }
-        }
-        ("TOTAL" | "DAILY", None) => {
-            return Err(AppError::Conflict(
-                "Konfigurasi kuota promo tidak valid.".into(),
-            ));
-        }
-        _ => {}
+    // O(1) atomic quota claim — no SELECT COUNT(*) scan inside write lock
+    let claim_res = sqlx::query(
+        "UPDATE promotions SET used_count = used_count + 1, updated_at = ? WHERE id = ? AND is_active = 1 AND used_count < quota_limit",
+    )
+    .bind(&now)
+    .bind(promo.id)
+    .execute(&mut *tx)
+    .await?;
+
+    if claim_res.rows_affected() == 0 {
+        return Err(AppError::Conflict(format!(
+            "Kuota promo \"{}\" sudah habis ({}/{}).",
+            promo.name, promo.used_count, promo.quota_limit
+        )));
     }
 
     let raw_discount = if promo.discount_type == "PERCENT" {
@@ -736,29 +769,32 @@ pub async fn apply_order_promo(
 
     sqlx::query(
         r#"
-        UPDATE orders
-        SET discount_amount = ?,
-            total_amount = ?,
-            promo_id = ?,
-            promo_name_snapshot = ?,
-            promo_applied_by_username = ?,
-            promo_receipt_text_snapshot = ?,
-            promo_receipt_media_type = ?,
-            promo_receipt_media_value = ?
-        WHERE id = ?
+        INSERT INTO applied_promotions (
+            order_id, promo_id, promo_name_snapshot, discount_amount,
+            applied_by_username, receipt_text_snapshot, receipt_media_type,
+            receipt_media_value, status, created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'APPLIED', ?)
         "#,
     )
-    .bind(discount_amount)
-    .bind(new_total)
+    .bind(order.id)
     .bind(promo.id)
     .bind(&promo.name)
+    .bind(discount_amount)
     .bind(&auth.username)
     .bind(&promo.receipt_promo_text)
     .bind(&promo.receipt_media_type)
     .bind(&promo.receipt_media_value)
-    .bind(order.id)
+    .bind(&now)
     .execute(&mut *tx)
     .await?;
+
+    sqlx::query("UPDATE orders SET discount_amount = ?, total_amount = ? WHERE id = ?")
+        .bind(discount_amount)
+        .bind(new_total)
+        .bind(order.id)
+        .execute(&mut *tx)
+        .await?;
 
     let updated: OrderRow = sqlx::query_as("SELECT * FROM orders WHERE id = ?")
         .bind(order.id)
@@ -769,6 +805,12 @@ pub async fn apply_order_promo(
             .bind(order.id)
             .fetch_all(&mut *tx)
             .await?;
+    let applied_promos: Vec<AppliedPromotionDetail> = sqlx::query_as(
+        "SELECT * FROM applied_promotions WHERE order_id = ? AND status = 'APPLIED' ORDER BY id ASC",
+    )
+    .bind(order.id)
+    .fetch_all(&mut *tx)
+    .await?;
 
     tx.commit().await?;
     tracing::info!(
@@ -778,7 +820,7 @@ pub async fn apply_order_promo(
         discount_amount,
         "promo applied to order"
     );
-    Ok(Json(OrderDetail::from_parts(updated, items)))
+    Ok(Json(OrderDetail::from_parts(updated, items, applied_promos)))
 }
 
 pub async fn remove_order_promo(
@@ -787,6 +829,7 @@ pub async fn remove_order_promo(
     Path(id): Path<i64>,
 ) -> AppResult<Json<OrderDetail>> {
     auth.require_roles(&[Role::Cashier, Role::Owner, Role::Admin])?;
+    let (_today, now) = now_business_and_iso();
     let mut tx = begin_write_tx(&state.pool).await?;
 
     let order: OrderRow = sqlx::query_as("SELECT * FROM orders WHERE id = ?")
@@ -807,23 +850,32 @@ pub async fn remove_order_promo(
         ));
     }
 
-    sqlx::query(
-        r#"
-        UPDATE orders
-        SET discount_amount = 0,
-            total_amount = subtotal_amount,
-            promo_id = NULL,
-            promo_name_snapshot = '',
-            promo_applied_by_username = '',
-            promo_receipt_text_snapshot = '',
-            promo_receipt_media_type = 'NONE',
-            promo_receipt_media_value = ''
-        WHERE id = ?
-        "#,
+    let prev_promos: Vec<(i64,)> = sqlx::query_as(
+        "SELECT promo_id FROM applied_promotions WHERE order_id = ? AND status = 'APPLIED'",
     )
     .bind(order.id)
-    .execute(&mut *tx)
+    .fetch_all(&mut *tx)
     .await?;
+
+    sqlx::query("DELETE FROM applied_promotions WHERE order_id = ? AND status = 'APPLIED'")
+        .bind(order.id)
+        .execute(&mut *tx)
+        .await?;
+
+    for (old_pid,) in prev_promos {
+        sqlx::query(
+            "UPDATE promotions SET used_count = MAX(0, used_count - 1), updated_at = ? WHERE id = ?",
+        )
+        .bind(&now)
+        .bind(old_pid)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    sqlx::query("UPDATE orders SET discount_amount = 0, total_amount = subtotal_amount WHERE id = ?")
+        .bind(order.id)
+        .execute(&mut *tx)
+        .await?;
 
     let updated: OrderRow = sqlx::query_as("SELECT * FROM orders WHERE id = ?")
         .bind(order.id)
@@ -837,7 +889,7 @@ pub async fn remove_order_promo(
 
     tx.commit().await?;
     tracing::info!(actor = %auth.username, order_id = order.id, "promo removed from order");
-    Ok(Json(OrderDetail::from_parts(updated, items)))
+    Ok(Json(OrderDetail::from_parts(updated, items, Vec::new())))
 }
 
 pub async fn void_order(
@@ -972,6 +1024,31 @@ pub async fn void_order(
         .await?;
     }
 
+    // Void any applied promotions on this order and restore their quota slots atomically
+    let voided_promos: Vec<(i64,)> = sqlx::query_as(
+        "SELECT promo_id FROM applied_promotions WHERE order_id = ? AND status = 'APPLIED'",
+    )
+    .bind(id)
+    .fetch_all(&mut *tx)
+    .await?;
+    if !voided_promos.is_empty() {
+        sqlx::query(
+            "UPDATE applied_promotions SET status = 'VOIDED' WHERE order_id = ? AND status = 'APPLIED'",
+        )
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+        for (pid,) in voided_promos {
+            sqlx::query(
+                "UPDATE promotions SET used_count = MAX(0, used_count - 1), updated_at = ? WHERE id = ?",
+            )
+            .bind(&now)
+            .bind(pid)
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
+
     sqlx::query(
         "UPDATE orders SET status = 'VOIDED', voided_at = ?, void_reason = ? WHERE id = ?",
     )
@@ -987,5 +1064,5 @@ pub async fn void_order(
         .await?;
 
     tx.commit().await?;
-    Ok(Json(OrderDetail::from_parts(updated, items)))
+    Ok(Json(OrderDetail::from_parts(updated, items, Vec::new())))
 }

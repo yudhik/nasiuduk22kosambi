@@ -316,7 +316,11 @@ export function buildEscPosReceipt58mm(
   pushLine(divider);
   if (order.discount_amount > 0) {
     pushLine(padLeftRight('Subtotal', formatRpPlain(order.subtotal_amount), WIDTH));
-    const discLabel = order.promo_name ? `Diskon (${order.promo_name})` : 'Diskon';
+    const promoNames = order.applied_promotions
+      .map((ap) => ap.promo_name_snapshot)
+      .filter(Boolean)
+      .join(', ');
+    const discLabel = promoNames ? `Diskon (${promoNames})` : 'Diskon';
     for (const l of wrapText(discLabel, WIDTH)) {
       pushLine(l);
     }
@@ -355,13 +359,15 @@ export function buildEscPosReceipt58mm(
     }
   }
 
-  // Conditional Promo Section: ONLY printed when a promo is applied AND has text or QR/Barcode media
-  const promoText = order.promo_receipt_text?.trim() ?? '';
-  const promoMediaType = order.promo_receipt_media_type ?? 'NONE';
-  const promoMediaVal = order.promo_receipt_media_value?.trim() ?? '';
-  const hasPromoMedia =
-    (promoMediaType === 'QR' || promoMediaType === 'BARCODE') && promoMediaVal.length > 0;
-  if (order.promo_id !== null && (promoText.length > 0 || hasPromoMedia)) {
+  // Conditional Promo Section: ONLY printed when applied promotion(s) have text or QR/Barcode media
+  for (const ap of order.applied_promotions) {
+    const promoText = ap.receipt_text_snapshot?.trim() ?? '';
+    const promoMediaType = ap.receipt_media_type ?? 'NONE';
+    const promoMediaVal = ap.receipt_media_value?.trim() ?? '';
+    const hasPromoMedia =
+      (promoMediaType === 'QR' || promoMediaType === 'BARCODE') && promoMediaVal.length > 0;
+    if (promoText.length === 0 && !hasPromoMedia) continue;
+
     pushLine(divider);
     pushBytes(0x1b, 0x61, 0x01); // Center
     if (promoText) {

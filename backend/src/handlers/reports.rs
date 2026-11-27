@@ -171,12 +171,13 @@ async fn build_daily_report_in_tx(
     let promo_summary: Vec<PromoUsageSummary> = sqlx::query_as(
         r#"
         SELECT
-            promo_name_snapshot AS promo_name,
+            ap.promo_name_snapshot AS promo_name,
             COUNT(*) AS order_count,
-            COALESCE(SUM(discount_amount), 0) AS total_discount
-        FROM orders
-        WHERE business_date = ? AND status = 'PAID' AND promo_id IS NOT NULL
-        GROUP BY promo_name_snapshot
+            COALESCE(SUM(ap.discount_amount), 0) AS total_discount
+        FROM applied_promotions ap
+        INNER JOIN orders o ON o.id = ap.order_id
+        WHERE o.business_date = ? AND o.status = 'PAID' AND ap.status = 'APPLIED'
+        GROUP BY ap.promo_name_snapshot
         ORDER BY total_discount DESC, order_count DESC
         "#,
     )
