@@ -643,6 +643,7 @@ pub async fn apply_order_promo(
 ) -> AppResult<Json<OrderDetail>> {
     auth.require_roles(&[Role::Cashier, Role::Owner, Role::Admin])?;
     let (_today, now) = now_business_and_iso();
+    let (now_dt, now_dow, now_hhmm) = crate::db::now_local_schedule_clock();
     let mut tx = begin_write_tx(&state.pool).await?;
 
     let order: OrderRow = sqlx::query_as("SELECT * FROM orders WHERE id = ?")
@@ -671,10 +672,12 @@ pub async fn apply_order_promo(
     .fetch_all(&mut *tx)
     .await?;
     if !prev_promos.is_empty() {
-        sqlx::query("DELETE FROM applied_promotions WHERE order_id = ? AND status = 'APPLIED'")
-            .bind(order.id)
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query(
+            "UPDATE applied_promotions SET status = 'VOIDED' WHERE order_id = ? AND status = 'APPLIED'",
+        )
+        .bind(order.id)
+        .execute(&mut *tx)
+        .await?;
         for (old_pid,) in prev_promos {
             sqlx::query(
                 "UPDATE promotions SET used_count = MAX(0, used_count - 1), updated_at = ? WHERE id = ?",
@@ -696,17 +699,39 @@ pub async fn apply_order_promo(
         return Err(AppError::Conflict("Promo ini sudah tidak aktif.".into()));
     }
 
-    if let Some(ref start) = promo.start_date {
-        if order.business_date.as_str() < start.as_str() {
+    if let Some(ref start) = promo.start_at {
+        if now_dt.as_str() < start.as_str() {
             return Err(AppError::Conflict(format!(
-                "Promo ini baru berlaku mulai tanggal {start}."
+                "Promo ini baru berlaku mulai {}.",
+                start.replace('T', " ")
             )));
         }
     }
-    if let Some(ref end) = promo.end_date {
-        if order.business_date.as_str() > end.as_str() {
+    if let Some(ref end) = promo.end_at {
+        if now_dt.as_str() > end.as_str() {
             return Err(AppError::Conflict(format!(
-                "Promo ini sudah berakhir pada tanggal {end}."
+                "Promo ini sudah berakhir pada {}.",
+                end.replace('T', " ")
+            )));
+        }
+    }
+
+    let schedules: Vec<crate::models::PromotionSchedule> = sqlx::query_as(
+        "SELECT * FROM promotion_schedules WHERE promo_id = ? ORDER BY day_of_week ASC, start_time ASC",
+    )
+    .bind(promo.id)
+    .fetch_all(&mut *tx)
+    .await?;
+
+    if !schedules.is_empty() {
+        let in_schedule = schedules.iter().any(|s| {
+            s.day_of_week == now_dow
+                && now_hhmm.as_str() >= s.start_time.as_str()
+                && now_hhmm.as_str() <= s.end_time.as_str()
+        });
+        if !in_schedule {
+            return Err(AppError::Conflict(format!(
+                "Promo ini tidak berlaku pada hari/jam sekarang ({now_hhmm})."
             )));
         }
     }
@@ -771,10 +796,9 @@ pub async fn apply_order_promo(
         r#"
         INSERT INTO applied_promotions (
             order_id, promo_id, promo_name_snapshot, discount_amount,
-            applied_by_username, receipt_text_snapshot, receipt_media_type,
-            receipt_media_value, status, created_at
+            applied_by_username, status, created_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'APPLIED', ?)
+        VALUES (?, ?, ?, ?, ?, 'APPLIED', ?)
         "#,
     )
     .bind(order.id)
@@ -782,9 +806,6 @@ pub async fn apply_order_promo(
     .bind(&promo.name)
     .bind(discount_amount)
     .bind(&auth.username)
-    .bind(&promo.receipt_promo_text)
-    .bind(&promo.receipt_media_type)
-    .bind(&promo.receipt_media_value)
     .bind(&now)
     .execute(&mut *tx)
     .await?;
@@ -857,10 +878,12 @@ pub async fn remove_order_promo(
     .fetch_all(&mut *tx)
     .await?;
 
-    sqlx::query("DELETE FROM applied_promotions WHERE order_id = ? AND status = 'APPLIED'")
-        .bind(order.id)
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query(
+        "UPDATE applied_promotions SET status = 'VOIDED' WHERE order_id = ? AND status = 'APPLIED'",
+    )
+    .bind(order.id)
+    .execute(&mut *tx)
+    .await?;
 
     for (old_pid,) in prev_promos {
         sqlx::query(

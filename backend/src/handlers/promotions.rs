@@ -1,9 +1,11 @@
+use std::collections::{BTreeSet, HashMap};
+
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
     Json,
 };
-use chrono::NaiveDate;
+use chrono::{Datelike, NaiveDateTime, NaiveTime};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -11,7 +13,10 @@ use crate::{
     auth::{AuthUser, Role},
     db::{begin_write_tx, now_iso},
     error::{AppError, AppResult},
-    models::{CreatePromotionRequest, PromotionResponse, PromotionRow, UpdatePromotionRequest},
+    models::{
+        CreatePromotionRequest, PromotionResponse, PromotionRow, PromotionSchedule,
+        PromotionScheduleInput, UpdatePromotionRequest,
+    },
     AppState,
 };
 
@@ -33,17 +38,7 @@ fn is_disallowed_unicode(c: char) -> bool {
     )
 }
 
-fn sanitize_promo_multiline(raw: &str) -> String {
-    let normalized = raw.replace("\r\n", "\n").replace('\r', "\n");
-    normalized
-        .chars()
-        .filter(|&c| !(c.is_control() && c != '\n') && !is_disallowed_unicode(c))
-        .collect::<String>()
-        .trim()
-        .to_string()
-}
-
-fn sanitize_media_value(raw: &str) -> String {
+fn sanitize_single_line(raw: &str) -> String {
     raw.chars()
         .filter(|&c| !c.is_control() && !is_disallowed_unicode(c))
         .collect::<String>()
@@ -51,18 +46,65 @@ fn sanitize_media_value(raw: &str) -> String {
         .to_string()
 }
 
-fn parse_optional_date(raw: Option<&str>, field_label: &str) -> AppResult<Option<String>> {
+fn parse_optional_datetime(raw: Option<&str>, field_label: &str) -> AppResult<Option<String>> {
     match raw.map(str::trim).filter(|s| !s.is_empty()) {
         Some(s) => {
-            let parsed = NaiveDate::parse_from_str(s, "%Y-%m-%d").map_err(|_| {
-                AppError::Validation(format!(
-                    "{field_label} tidak valid (harus format YYYY-MM-DD)."
-                ))
-            })?;
-            Ok(Some(parsed.format("%Y-%m-%d").to_string()))
+            let parsed = NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M")
+                .or_else(|_| NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M"))
+                .or_else(|_| NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S"))
+                .or_else(|_| NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S"))
+                .map_err(|_| {
+                    AppError::Validation(format!(
+                        "{field_label} tidak valid (harus format YYYY-MM-DDTHH:MM)."
+                    ))
+                })?;
+            if !(2000..=2100).contains(&parsed.year()) {
+                return Err(AppError::Validation(format!(
+                    "{field_label} harus berada di antara tahun 2000 hingga 2100."
+                )));
+            }
+            Ok(Some(parsed.format("%Y-%m-%dT%H:%M").to_string()))
         }
         None => Ok(None),
     }
+}
+
+fn parse_required_hhmm(raw: &str, field_label: &str) -> AppResult<String> {
+    let s = raw.trim();
+    let parsed = NaiveTime::parse_from_str(s, "%H:%M")
+        .or_else(|_| NaiveTime::parse_from_str(s, "%H:%M:%S"))
+        .map_err(|_| {
+            AppError::Validation(format!("{field_label} tidak valid (harus format HH:MM)."))
+        })?;
+    Ok(parsed.format("%H:%M").to_string())
+}
+
+fn validate_schedules(
+    schedules: &[PromotionScheduleInput],
+) -> AppResult<Vec<(i64, String, String)>> {
+    if schedules.len() > 21 {
+        return Err(AppError::Validation(
+            "Maksimal 21 slot jadwal promo.".into(),
+        ));
+    }
+    let mut dedup: BTreeSet<(i64, String, String)> = BTreeSet::new();
+    for s in schedules {
+        if !(0..=6).contains(&s.day_of_week) {
+            return Err(AppError::Validation(
+                "Hari jadwal tidak valid (harus 0=Senin hingga 6=Minggu).".into(),
+            ));
+        }
+        let start = parse_required_hhmm(&s.start_time, "Jam mulai jadwal")?;
+        let end = parse_required_hhmm(&s.end_time, "Jam selesai jadwal")?;
+        if start >= end {
+            return Err(AppError::Validation(
+                "Jam mulai jadwal harus lebih awal dari jam selesai (tanpa lintas tengah malam)."
+                    .into(),
+            ));
+        }
+        dedup.insert((s.day_of_week, start, end));
+    }
+    Ok(dedup.into_iter().collect())
 }
 
 struct ValidatedPromo {
@@ -72,12 +114,9 @@ struct ValidatedPromo {
     max_discount: Option<i64>,
     min_order_amount: i64,
     quota_limit: i64,
-    start_date: Option<String>,
-    end_date: Option<String>,
+    start_at: Option<String>,
+    end_at: Option<String>,
     regular_only: i64,
-    receipt_promo_text: String,
-    receipt_media_type: &'static str,
-    receipt_media_value: String,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -88,14 +127,11 @@ fn validate_promo_fields(
     max_discount: Option<i64>,
     min_order_amount: i64,
     quota_limit: i64,
-    start_date: Option<&str>,
-    end_date: Option<&str>,
+    start_at: Option<&str>,
+    end_at: Option<&str>,
     regular_only: bool,
-    receipt_promo_text: Option<&str>,
-    receipt_media_type: Option<&str>,
-    receipt_media_value: Option<&str>,
 ) -> AppResult<ValidatedPromo> {
-    let cleaned_name = sanitize_media_value(name);
+    let cleaned_name = sanitize_single_line(name);
     if cleaned_name.is_empty() || cleaned_name.chars().count() > 80 {
         return Err(AppError::Validation(
             "Nama promo wajib diisi (maksimal 80 karakter).".into(),
@@ -149,72 +185,15 @@ fn validate_promo_fields(
         ));
     }
 
-    let clean_start = parse_optional_date(start_date, "Tanggal mulai")?;
-    let clean_end = parse_optional_date(end_date, "Tanggal berakhir")?;
+    let clean_start = parse_optional_datetime(start_at, "Waktu mulai")?;
+    let clean_end = parse_optional_datetime(end_at, "Waktu berakhir")?;
     if let (Some(s), Some(e)) = (&clean_start, &clean_end) {
         if s > e {
             return Err(AppError::Validation(
-                "Tanggal mulai tidak boleh melebihi tanggal berakhir.".into(),
+                "Waktu mulai tidak boleh melebihi waktu berakhir.".into(),
             ));
         }
     }
-
-    let clean_promo_text = sanitize_promo_multiline(receipt_promo_text.unwrap_or(""));
-    if clean_promo_text.chars().count() > 300 {
-        return Err(AppError::Validation(
-            "Teks bagian promo struk maksimal 300 karakter.".into(),
-        ));
-    }
-    if clean_promo_text.lines().count() > 6 {
-        return Err(AppError::Validation(
-            "Teks bagian promo struk maksimal 6 baris.".into(),
-        ));
-    }
-
-    let mtype: &'static str = match receipt_media_type
-        .unwrap_or("NONE")
-        .trim()
-        .to_ascii_uppercase()
-        .as_str()
-    {
-        "NONE" | "" => "NONE",
-        "QR" => "QR",
-        "BARCODE" => "BARCODE",
-        _ => {
-            return Err(AppError::Validation(
-                "Tipe media struk harus NONE, QR, atau BARCODE.".into(),
-            ))
-        }
-    };
-
-    let clean_media_val = match mtype {
-        "NONE" => String::new(),
-        "QR" => {
-            let v = sanitize_media_value(receipt_media_value.unwrap_or(""));
-            if v.is_empty() || v.len() > 500 {
-                return Err(AppError::Validation(
-                    "Link / teks QR Code wajib diisi (maksimal 500 byte).".into(),
-                ));
-            }
-            v
-        }
-        "BARCODE" => {
-            let v = sanitize_media_value(receipt_media_value.unwrap_or(""));
-            if v.is_empty()
-                || v.len() > 48
-                || !v
-                    .bytes()
-                    .all(|b| (0x20..=0x7E).contains(&b) && b != b'{')
-            {
-                return Err(AppError::Validation(
-                    "Nilai Barcode (CODE128) wajib berupa karakter ASCII standar tanpa '{' (1–48 karakter)."
-                        .into(),
-                ));
-            }
-            v
-        }
-        _ => String::new(),
-    };
 
     Ok(ValidatedPromo {
         name: cleaned_name,
@@ -223,12 +202,9 @@ fn validate_promo_fields(
         max_discount: clean_max_discount,
         min_order_amount,
         quota_limit,
-        start_date: clean_start,
-        end_date: clean_end,
+        start_at: clean_start,
+        end_at: clean_end,
         regular_only: if regular_only { 1 } else { 0 },
-        receipt_promo_text: clean_promo_text,
-        receipt_media_type: mtype,
-        receipt_media_value: clean_media_val,
     })
 }
 
@@ -240,17 +216,46 @@ pub async fn list_promotions(
     auth.require_roles(&[Role::Cashier, Role::Owner, Role::Admin])?;
 
     let active_only = auth.role == Role::Cashier || query.active_only.unwrap_or(false);
+    let mut tx = state.pool.begin().await?;
     let rows: Vec<PromotionRow> = if active_only {
         sqlx::query_as("SELECT * FROM promotions WHERE is_active = 1 ORDER BY id DESC")
-            .fetch_all(&state.pool)
+            .fetch_all(&mut *tx)
             .await?
     } else {
         sqlx::query_as("SELECT * FROM promotions ORDER BY is_active DESC, id DESC")
-            .fetch_all(&state.pool)
+            .fetch_all(&mut *tx)
             .await?
     };
 
-    Ok(Json(rows.into_iter().map(PromotionResponse::from).collect()))
+    let all_schedules: Vec<PromotionSchedule> = if active_only {
+        sqlx::query_as(
+            "SELECT ps.* FROM promotion_schedules ps INNER JOIN promotions p ON p.id = ps.promo_id WHERE p.is_active = 1 ORDER BY ps.promo_id ASC, ps.day_of_week ASC, ps.start_time ASC",
+        )
+        .fetch_all(&mut *tx)
+        .await?
+    } else {
+        sqlx::query_as(
+            "SELECT * FROM promotion_schedules ORDER BY promo_id ASC, day_of_week ASC, start_time ASC",
+        )
+        .fetch_all(&mut *tx)
+        .await?
+    };
+    tx.commit().await?;
+
+    let mut sched_map: HashMap<i64, Vec<PromotionSchedule>> = HashMap::new();
+    for s in all_schedules {
+        sched_map.entry(s.promo_id).or_default().push(s);
+    }
+
+    let out = rows
+        .into_iter()
+        .map(|row| {
+            let scheds = sched_map.remove(&row.id).unwrap_or_default();
+            PromotionResponse::from_parts(row, scheds)
+        })
+        .collect();
+
+    Ok(Json(out))
 }
 
 pub async fn create_promotion(
@@ -267,13 +272,14 @@ pub async fn create_promotion(
         req.max_discount,
         req.min_order_amount.unwrap_or(0),
         req.quota_limit,
-        req.start_date.as_deref(),
-        req.end_date.as_deref(),
+        req.start_at.as_deref(),
+        req.end_at.as_deref(),
         req.regular_only.unwrap_or(true),
-        req.receipt_promo_text.as_deref(),
-        req.receipt_media_type.as_deref(),
-        req.receipt_media_value.as_deref(),
     )?;
+    let clean_schedules = match req.schedules.as_deref() {
+        Some(list) => validate_schedules(list)?,
+        None => Vec::new(),
+    };
 
     let now = now_iso();
     let mut tx = begin_write_tx(&state.pool).await?;
@@ -281,11 +287,10 @@ pub async fn create_promotion(
         r#"
         INSERT INTO promotions (
             name, discount_type, discount_value, max_discount, min_order_amount,
-            quota_limit, used_count, start_date, end_date, regular_only,
-            receipt_promo_text, receipt_media_type, receipt_media_value,
+            quota_limit, used_count, start_at, end_at, regular_only,
             is_active, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, 1, ?, ?)
         "#,
     )
     .bind(&v.name)
@@ -294,22 +299,37 @@ pub async fn create_promotion(
     .bind(v.max_discount)
     .bind(v.min_order_amount)
     .bind(v.quota_limit)
-    .bind(&v.start_date)
-    .bind(&v.end_date)
+    .bind(&v.start_at)
+    .bind(&v.end_at)
     .bind(v.regular_only)
-    .bind(&v.receipt_promo_text)
-    .bind(v.receipt_media_type)
-    .bind(&v.receipt_media_value)
     .bind(&now)
     .bind(&now)
     .execute(&mut *tx)
     .await?;
 
     let id = res.last_insert_rowid();
+    for (dow, start_t, end_t) in &clean_schedules {
+        sqlx::query(
+            "INSERT INTO promotion_schedules (promo_id, day_of_week, start_time, end_time) VALUES (?, ?, ?, ?)",
+        )
+        .bind(id)
+        .bind(dow)
+        .bind(start_t)
+        .bind(end_t)
+        .execute(&mut *tx)
+        .await?;
+    }
+
     let row: PromotionRow = sqlx::query_as("SELECT * FROM promotions WHERE id = ?")
         .bind(id)
         .fetch_one(&mut *tx)
         .await?;
+    let saved_schedules: Vec<PromotionSchedule> = sqlx::query_as(
+        "SELECT * FROM promotion_schedules WHERE promo_id = ? ORDER BY day_of_week ASC, start_time ASC",
+    )
+    .bind(id)
+    .fetch_all(&mut *tx)
+    .await?;
     tx.commit().await?;
 
     tracing::info!(
@@ -317,11 +337,14 @@ pub async fn create_promotion(
         promo_id = id,
         discount_type = v.discount_type,
         quota_limit = v.quota_limit,
-        media_type = v.receipt_media_type,
+        schedule_count = saved_schedules.len(),
         "promotion created"
     );
 
-    Ok((StatusCode::CREATED, Json(PromotionResponse::from(row))))
+    Ok((
+        StatusCode::CREATED,
+        Json(PromotionResponse::from_parts(row, saved_schedules)),
+    ))
 }
 
 pub async fn update_promotion(
@@ -339,13 +362,14 @@ pub async fn update_promotion(
         req.max_discount,
         req.min_order_amount,
         req.quota_limit,
-        req.start_date.as_deref(),
-        req.end_date.as_deref(),
+        req.start_at.as_deref(),
+        req.end_at.as_deref(),
         req.regular_only,
-        Some(&req.receipt_promo_text),
-        Some(&req.receipt_media_type),
-        Some(&req.receipt_media_value),
     )?;
+    let clean_schedules_opt = match req.schedules.as_deref() {
+        Some(list) => Some(validate_schedules(list)?),
+        None => None,
+    };
 
     let now = now_iso();
     let is_active_int: i64 = if req.is_active { 1 } else { 0 };
@@ -369,8 +393,7 @@ pub async fn update_promotion(
         UPDATE promotions
         SET name = ?, discount_type = ?, discount_value = ?, max_discount = ?,
             min_order_amount = ?, quota_limit = ?,
-            start_date = ?, end_date = ?, regular_only = ?,
-            receipt_promo_text = ?, receipt_media_type = ?, receipt_media_value = ?,
+            start_at = ?, end_at = ?, regular_only = ?,
             is_active = ?, updated_at = ?
         WHERE id = ?
         "#,
@@ -381,22 +404,43 @@ pub async fn update_promotion(
     .bind(v.max_discount)
     .bind(v.min_order_amount)
     .bind(v.quota_limit)
-    .bind(&v.start_date)
-    .bind(&v.end_date)
+    .bind(&v.start_at)
+    .bind(&v.end_at)
     .bind(v.regular_only)
-    .bind(&v.receipt_promo_text)
-    .bind(v.receipt_media_type)
-    .bind(&v.receipt_media_value)
     .bind(is_active_int)
     .bind(&now)
     .bind(id)
     .execute(&mut *tx)
     .await?;
 
+    if let Some(clean_schedules) = clean_schedules_opt {
+        sqlx::query("DELETE FROM promotion_schedules WHERE promo_id = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        for (dow, start_t, end_t) in &clean_schedules {
+            sqlx::query(
+                "INSERT INTO promotion_schedules (promo_id, day_of_week, start_time, end_time) VALUES (?, ?, ?, ?)",
+            )
+            .bind(id)
+            .bind(dow)
+            .bind(start_t)
+            .bind(end_t)
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
+
     let row: PromotionRow = sqlx::query_as("SELECT * FROM promotions WHERE id = ?")
         .bind(id)
         .fetch_one(&mut *tx)
         .await?;
+    let saved_schedules: Vec<PromotionSchedule> = sqlx::query_as(
+        "SELECT * FROM promotion_schedules WHERE promo_id = ? ORDER BY day_of_week ASC, start_time ASC",
+    )
+    .bind(id)
+    .fetch_all(&mut *tx)
+    .await?;
     tx.commit().await?;
 
     tracing::info!(
@@ -404,10 +448,11 @@ pub async fn update_promotion(
         promo_id = id,
         quota_limit = v.quota_limit,
         is_active = req.is_active,
+        schedule_count = saved_schedules.len(),
         "promotion updated"
     );
 
-    Ok(Json(PromotionResponse::from(row)))
+    Ok(Json(PromotionResponse::from_parts(row, saved_schedules)))
 }
 
 pub async fn delete_promotion(

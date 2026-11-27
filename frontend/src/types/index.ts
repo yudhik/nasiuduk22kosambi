@@ -152,7 +152,20 @@ export interface OrderItemDetail {
 export type OrderStatus = 'UNPAID' | 'PAID' | 'VOIDED';
 
 export type PromoDiscountType = 'FIXED' | 'PERCENT';
-export type PromoReceiptMediaType = 'NONE' | 'QR' | 'BARCODE';
+
+export interface PromotionSchedule {
+  id: number;
+  promo_id: number;
+  day_of_week: number; // 0=Senin .. 6=Minggu
+  start_time: string;
+  end_time: string;
+}
+
+export interface PromotionScheduleInput {
+  day_of_week: number;
+  start_time: string;
+  end_time: string;
+}
 
 export interface Promotion {
   id: number;
@@ -164,12 +177,10 @@ export interface Promotion {
   quota_limit: number;
   used_count: number;
   remaining_quota: number;
-  start_date: string | null;
-  end_date: string | null;
+  start_at: string | null;
+  end_at: string | null;
+  schedules: PromotionSchedule[];
   regular_only: boolean;
-  receipt_promo_text: string;
-  receipt_media_type: PromoReceiptMediaType;
-  receipt_media_value: string;
   is_active: boolean;
   created_at: string;
   updated_at: string;
@@ -182,12 +193,10 @@ export interface UpsertPromotionPayload {
   max_discount?: number | null;
   min_order_amount: number;
   quota_limit: number;
-  start_date?: string | null;
-  end_date?: string | null;
+  start_at?: string | null;
+  end_at?: string | null;
+  schedules: PromotionScheduleInput[];
   regular_only: boolean;
-  receipt_promo_text: string;
-  receipt_media_type: PromoReceiptMediaType;
-  receipt_media_value: string;
   is_active?: boolean;
 }
 
@@ -198,9 +207,6 @@ export interface AppliedPromotionDetail {
   promo_name_snapshot: string;
   discount_amount: number;
   applied_by_username: string;
-  receipt_text_snapshot: string;
-  receipt_media_type: PromoReceiptMediaType;
-  receipt_media_value: string;
   status: string;
   created_at: string;
 }

@@ -1,26 +1,67 @@
 import { useCallback, useEffect, useState } from 'react';
-import {
-  Barcode,
-  Edit2,
-  Percent,
-  Plus,
-  QrCode,
-  Tag,
-  Trash2,
-} from 'lucide-react';
+import { Edit2, Percent, Plus, Trash2 } from 'lucide-react';
 import { api } from '../api/client';
 import { BottomSheet } from './BottomSheet';
 import type { ToastMessage } from './ToastContainer';
 import type {
   PromoDiscountType,
-  PromoReceiptMediaType,
   Promotion,
+  PromotionSchedule,
+  PromotionScheduleInput,
 } from '../types';
 import {
   formatRupiah,
   formatThousandsInput,
   parseThousandsInput,
 } from '../utils/format';
+
+const DAY_LABELS = ['Sen', 'Sel', 'Rab', 'Kam', 'Jum', 'Sab', 'Min'] as const;
+
+interface ScheduleRule {
+  days: number[];
+  start_time: string;
+  end_time: string;
+}
+
+function groupSchedulesToRules(schedules: PromotionSchedule[]): ScheduleRule[] {
+  const map = new Map<string, ScheduleRule>();
+  for (const s of schedules) {
+    const key = `${s.start_time}-${s.end_time}`;
+    const existing = map.get(key);
+    if (existing) {
+      if (!existing.days.includes(s.day_of_week)) {
+        existing.days.push(s.day_of_week);
+        existing.days.sort((a, b) => a - b);
+      }
+    } else {
+      map.set(key, { days: [s.day_of_week], start_time: s.start_time, end_time: s.end_time });
+    }
+  }
+  return Array.from(map.values());
+}
+
+function formatDayGroup(days: number[]): string {
+  const sorted = [...new Set(days)].sort((a, b) => a - b);
+  if (sorted.length === 7) return 'Setiap Hari';
+  if (sorted.join(',') === '0,1,2,3,4') return 'Sen–Jum';
+  if (sorted.join(',') === '5,6') return 'Sab–Min';
+  return sorted.map((d) => DAY_LABELS[d] ?? String(d)).join(', ');
+}
+
+function summarizeSchedules(schedules: PromotionSchedule[]): string {
+  if (!schedules || schedules.length === 0) return '';
+  return groupSchedulesToRules(schedules)
+    .map((r) => `${formatDayGroup(r.days)} ${r.start_time}–${r.end_time}`)
+    .join('; ');
+}
+
+function formatCompactDateTime(isoLocal: string): string {
+  const [datePart, timePart] = isoLocal.split('T');
+  if (!datePart) return isoLocal;
+  const parts = datePart.split('-');
+  if (parts.length !== 3) return isoLocal.replace('T', ' ');
+  return `${parts[2]}-${parts[1]}-${parts[0]}${timePart ? ` ${timePart.slice(0, 5)}` : ''}`;
+}
 
 interface PromotionsSectionProps {
   onToast: (title: string, description?: string, tone?: ToastMessage['tone']) => void;
@@ -43,12 +84,13 @@ export function PromotionsSection({ onToast }: PromotionsSectionProps) {
   const [maxDiscount, setMaxDiscount] = useState('');
   const [minOrder, setMinOrder] = useState('');
   const [quotaLimit, setQuotaLimit] = useState('50');
-  const [startDate, setStartDate] = useState('');
-  const [endDate, setEndDate] = useState('');
+  const [startAt, setStartAt] = useState('');
+  const [endAt, setEndAt] = useState('');
+  const [useSchedule, setUseSchedule] = useState(false);
+  const [scheduleRules, setScheduleRules] = useState<ScheduleRule[]>([
+    { days: [0, 1, 2, 3, 4, 5, 6], start_time: '14:00', end_time: '17:00' },
+  ]);
   const [regularOnly, setRegularOnly] = useState(true);
-  const [receiptText, setReceiptText] = useState('');
-  const [mediaType, setMediaType] = useState<PromoReceiptMediaType>('NONE');
-  const [mediaValue, setMediaValue] = useState('');
   const [isActive, setIsActive] = useState(true);
 
   const loadPromos = useCallback(async () => {
@@ -76,12 +118,11 @@ export function PromotionsSection({ onToast }: PromotionsSectionProps) {
     setMaxDiscount('');
     setMinOrder('');
     setQuotaLimit('50');
-    setStartDate('');
-    setEndDate('');
+    setStartAt('');
+    setEndAt('');
+    setUseSchedule(false);
+    setScheduleRules([{ days: [0, 1, 2, 3, 4, 5, 6], start_time: '14:00', end_time: '17:00' }]);
     setRegularOnly(true);
-    setReceiptText('');
-    setMediaType('NONE');
-    setMediaValue('');
     setIsActive(true);
     setError(null);
     setModalOpen(true);
@@ -99,12 +140,16 @@ export function PromotionsSection({ onToast }: PromotionsSectionProps) {
     setMaxDiscount(p.max_discount ? formatThousandsInput(String(p.max_discount)) : '');
     setMinOrder(p.min_order_amount > 0 ? formatThousandsInput(String(p.min_order_amount)) : '');
     setQuotaLimit(String(p.quota_limit));
-    setStartDate(p.start_date ?? '');
-    setEndDate(p.end_date ?? '');
+    setStartAt(p.start_at ?? '');
+    setEndAt(p.end_at ?? '');
+    const grouped = groupSchedulesToRules(p.schedules ?? []);
+    setUseSchedule(grouped.length > 0);
+    setScheduleRules(
+      grouped.length > 0
+        ? grouped
+        : [{ days: [0, 1, 2, 3, 4, 5, 6], start_time: '14:00', end_time: '17:00' }]
+    );
     setRegularOnly(p.regular_only);
-    setReceiptText(p.receipt_promo_text);
-    setMediaType(p.receipt_media_type);
-    setMediaValue(p.receipt_media_value);
     setIsActive(p.is_active);
     setError(null);
     setModalOpen(true);
@@ -129,13 +174,25 @@ export function PromotionsSection({ onToast }: PromotionsSectionProps) {
       setError('Kuota promo wajib diisi minimal 1 pelanggan.');
       return;
     }
-    if (mediaType !== 'NONE' && !mediaValue.trim()) {
-      setError(
-        mediaType === 'QR'
-          ? 'Isi URL / teks untuk QR Code.'
-          : 'Isi kode ASCII untuk Barcode CODE128.'
-      );
-      return;
+    const flattenedSchedules: PromotionScheduleInput[] = [];
+    if (useSchedule) {
+      for (const rule of scheduleRules) {
+        if (rule.days.length === 0) {
+          setError('Pilih minimal 1 hari untuk setiap jadwal khusus.');
+          return;
+        }
+        if (!rule.start_time || !rule.end_time || rule.start_time >= rule.end_time) {
+          setError('Jam mulai jadwal harus lebih awal dari jam selesai.');
+          return;
+        }
+        for (const day of rule.days) {
+          flattenedSchedules.push({
+            day_of_week: day,
+            start_time: rule.start_time,
+            end_time: rule.end_time,
+          });
+        }
+      }
     }
 
     try {
@@ -148,12 +205,10 @@ export function PromotionsSection({ onToast }: PromotionsSectionProps) {
         max_discount: parsedMax && !Number.isNaN(parsedMax) ? parsedMax : null,
         min_order_amount: Number.isNaN(parsedMin) ? 0 : parsedMin,
         quota_limit: parsedQuota,
-        start_date: startDate.trim() || null,
-        end_date: endDate.trim() || null,
+        start_at: startAt.trim() || null,
+        end_at: endAt.trim() || null,
+        schedules: flattenedSchedules,
         regular_only: regularOnly,
-        receipt_promo_text: receiptText,
-        receipt_media_type: mediaType,
-        receipt_media_value: mediaType === 'NONE' ? '' : mediaValue.trim(),
         is_active: isActive,
       };
       if (editing) {
@@ -195,7 +250,7 @@ export function PromotionsSection({ onToast }: PromotionsSectionProps) {
     <div className="space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <p className="text-xs text-brand-brown/75">
-          Atur diskon berbasis kuota pelanggan beserta <strong>Promo Section</strong> (teks + QR / Barcode) yang otomatis tercetak hanya saat promo dipakai.
+          Atur diskon promo berbasis kuota pelanggan, periode waktu, dan jadwal khusus (Happy Hour / Jumat Berkah) yang diterapkan Kasir sebelum pembayaran.
         </p>
         <div className="flex items-center gap-2">
           {inactiveCount > 0 && (
@@ -233,7 +288,7 @@ export function PromotionsSection({ onToast }: PromotionsSectionProps) {
           <Percent className="mx-auto h-8 w-8 text-brand-orange/70" />
           <p className="mt-2 text-sm font-bold text-brand-brown">Belum ada promo aktif</p>
           <p className="mt-1 text-xs text-brand-brown/65">
-            Buat promo kuota (mis. 50 pelanggan pertama) lengkap dengan QR Google Maps atau Barcode di struk.
+            Buat promo diskon berbasis kuota (mis. 50 pelanggan pertama, Happy Hour, atau Jumat Berkah).
           </p>
         </div>
       ) : (
@@ -271,8 +326,11 @@ export function PromotionsSection({ onToast }: PromotionsSectionProps) {
                         : 'Tanpa min. belanja'}
                       {' • '}
                       {p.regular_only ? 'Khusus Regular' : 'Semua Channel'}
-                      {(p.start_date || p.end_date) &&
-                        ` • ${p.start_date ?? '...'} s/d ${p.end_date ?? '...'}`}
+                      {(p.start_at || p.end_at) &&
+                        ` • ${p.start_at ? formatCompactDateTime(p.start_at) : '...'} s/d ${
+                          p.end_at ? formatCompactDateTime(p.end_at) : '...'
+                        }`}
+                      {p.schedules?.length > 0 && ` • ${summarizeSchedules(p.schedules)}`}
                     </p>
                   </div>
                   <div className="flex shrink-0 items-center gap-1">
@@ -313,33 +371,6 @@ export function PromotionsSection({ onToast }: PromotionsSectionProps) {
                       style={{ width: `${pct}%` }}
                     />
                   </div>
-                </div>
-
-                {/* Receipt Promo Section Badge */}
-                <div className="mt-2.5 flex flex-wrap items-center gap-1.5 border-t border-brand-amber-soft/50 pt-2 text-[11px]">
-                  <span className="inline-flex items-center gap-1 rounded-full border border-brand-amber-soft bg-brand-cream px-2 py-0.5 font-bold text-brand-brown">
-                    {p.receipt_media_type === 'QR' ? (
-                      <>
-                        <QrCode className="h-3 w-3 text-brand-orange" />
-                        <span>Struk: QR Code</span>
-                      </>
-                    ) : p.receipt_media_type === 'BARCODE' ? (
-                      <>
-                        <Barcode className="h-3 w-3 text-brand-orange" />
-                        <span>Struk: Barcode</span>
-                      </>
-                    ) : (
-                      <>
-                        <Tag className="h-3 w-3 text-brand-brown/60" />
-                        <span>Struk: Tanpa Gambar</span>
-                      </>
-                    )}
-                  </span>
-                  {p.receipt_promo_text && (
-                    <span className="truncate text-brand-brown/65">
-                      “{p.receipt_promo_text}”
-                    </span>
-                  )}
                 </div>
               </div>
             );
@@ -471,29 +502,176 @@ export function PromotionsSection({ onToast }: PromotionsSectionProps) {
             />
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <div>
               <label className="mb-1 block text-xs font-semibold text-brand-brown/80">
-                Mulai (Opsional)
+                Mulai (Tanggal &amp; Jam, Opsional)
               </label>
               <input
-                type="date"
-                value={startDate}
-                onChange={(e) => setStartDate(e.target.value)}
+                type="datetime-local"
+                value={startAt}
+                onChange={(e) => setStartAt(e.target.value)}
                 className="h-10 w-full rounded-xl border border-brand-amber-soft px-3 text-xs font-bold text-brand-brown focus:border-brand-orange focus:outline-none"
               />
             </div>
             <div>
               <label className="mb-1 block text-xs font-semibold text-brand-brown/80">
-                Berakhir (Opsional)
+                Berakhir (Tanggal &amp; Jam, Opsional)
               </label>
               <input
-                type="date"
-                value={endDate}
-                onChange={(e) => setEndDate(e.target.value)}
+                type="datetime-local"
+                value={endAt}
+                onChange={(e) => setEndAt(e.target.value)}
                 className="h-10 w-full rounded-xl border border-brand-amber-soft px-3 text-xs font-bold text-brand-brown focus:border-brand-orange focus:outline-none"
               />
             </div>
+          </div>
+
+          <div className="rounded-xl border border-brand-amber-soft/80 bg-brand-cream/40 p-3 space-y-2.5">
+            <label className="flex cursor-pointer items-center gap-2 text-xs font-bold text-brand-brown">
+              <input
+                type="checkbox"
+                checked={useSchedule}
+                onChange={(e) => setUseSchedule(e.target.checked)}
+                className="h-4 w-4 accent-brand-orange"
+              />
+              <span>Batasi hari &amp; jam khusus (Happy Hour / Jumat Berkah)</span>
+            </label>
+            {!useSchedule ? (
+              <p className="text-[11px] text-brand-brown/65">
+                Berlaku setiap saat selama periode promo aktif.
+              </p>
+            ) : (
+              <div className="space-y-2.5">
+                {scheduleRules.map((rule, idx) => (
+                  <div
+                    key={idx}
+                    className="space-y-2 rounded-xl border border-brand-amber-soft bg-white p-2.5"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-1">
+                      <div className="flex flex-wrap gap-1">
+                        {(
+                          [
+                            { label: 'Setiap Hari', days: [0, 1, 2, 3, 4, 5, 6] },
+                            { label: 'Sen–Jum', days: [0, 1, 2, 3, 4] },
+                            { label: 'Sab–Min', days: [5, 6] },
+                            { label: 'Jumat', days: [4] },
+                          ] as const
+                        ).map((preset) => (
+                          <button
+                            key={preset.label}
+                            type="button"
+                            onClick={() =>
+                              setScheduleRules((prev) =>
+                                prev.map((r, i) =>
+                                  i === idx ? { ...r, days: [...preset.days] } : r
+                                )
+                              )
+                            }
+                            className="rounded-md bg-brand-cream px-2 py-0.5 text-[10px] font-bold text-brand-brown hover:bg-brand-amber-soft/70"
+                          >
+                            {preset.label}
+                          </button>
+                        ))}
+                      </div>
+                      {scheduleRules.length > 1 && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setScheduleRules((prev) => prev.filter((_, i) => i !== idx))
+                          }
+                          className="text-[10px] font-bold text-rose-600 hover:underline"
+                        >
+                          Hapus
+                        </button>
+                      )}
+                    </div>
+
+                    <div className="grid grid-cols-7 gap-1">
+                      {DAY_LABELS.map((label, dayIdx) => {
+                        const selected = rule.days.includes(dayIdx);
+                        return (
+                          <button
+                            key={label}
+                            type="button"
+                            onClick={() =>
+                              setScheduleRules((prev) =>
+                                prev.map((r, i) => {
+                                  if (i !== idx) return r;
+                                  const nextDays = selected
+                                    ? r.days.filter((d) => d !== dayIdx)
+                                    : [...r.days, dayIdx].sort((a, b) => a - b);
+                                  return { ...r, days: nextDays };
+                                })
+                              )
+                            }
+                            className={`h-7 rounded-lg text-[10px] font-bold transition ${
+                              selected
+                                ? 'bg-brand-orange text-white'
+                                : 'border border-brand-amber-soft bg-white text-brand-brown/70 hover:bg-brand-cream'
+                            }`}
+                          >
+                            {label}
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="mb-0.5 block text-[10px] font-semibold text-brand-brown/70">
+                          Jam Mulai
+                        </label>
+                        <input
+                          type="time"
+                          value={rule.start_time}
+                          onChange={(e) =>
+                            setScheduleRules((prev) =>
+                              prev.map((r, i) =>
+                                i === idx ? { ...r, start_time: e.target.value } : r
+                              )
+                            )
+                          }
+                          className="h-9 w-full rounded-lg border border-brand-amber-soft px-2.5 text-xs font-bold text-brand-brown focus:border-brand-orange focus:outline-none"
+                        />
+                      </div>
+                      <div>
+                        <label className="mb-0.5 block text-[10px] font-semibold text-brand-brown/70">
+                          Jam Selesai
+                        </label>
+                        <input
+                          type="time"
+                          value={rule.end_time}
+                          onChange={(e) =>
+                            setScheduleRules((prev) =>
+                              prev.map((r, i) =>
+                                i === idx ? { ...r, end_time: e.target.value } : r
+                              )
+                            )
+                          }
+                          className="h-9 w-full rounded-lg border border-brand-amber-soft px-2.5 text-xs font-bold text-brand-brown focus:border-brand-orange focus:outline-none"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                ))}
+
+                {scheduleRules.length < 3 && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setScheduleRules((prev) => [
+                        ...prev,
+                        { days: [0, 1, 2, 3, 4], start_time: '18:00', end_time: '21:00' },
+                      ])
+                    }
+                    className="text-xs font-bold text-brand-orange hover:underline"
+                  >
+                    + Tambah Slot Jadwal (mis. Sarapan &amp; Makan Malam)
+                  </button>
+                )}
+              </div>
+            )}
           </div>
 
           <div className="flex flex-wrap gap-4">
@@ -516,95 +694,6 @@ export function PromotionsSection({ onToast }: PromotionsSectionProps) {
                 />
                 <span>Promo Aktif</span>
               </label>
-            )}
-          </div>
-
-          {/* Receipt Promo Section Configuration */}
-          <div className="space-y-3 rounded-2xl border border-brand-amber-soft bg-brand-cream/60 p-3.5">
-            <div>
-              <p className="text-xs font-extrabold text-brand-brown">
-                Promo Section di Struk (Cetak Khusus Saat Promo Dipakai)
-              </p>
-              <p className="mt-0.5 text-[11px] text-brand-brown/65">
-                Jika nota tidak memakai promo, struk berhenti di footer normal tanpa mencetak bagian ini.
-              </p>
-            </div>
-
-            <div>
-              <label className="mb-1 block text-xs font-semibold text-brand-brown/80">
-                Teks Kecil Promo (Opsional)
-              </label>
-              <textarea
-                rows={2}
-                maxLength={300}
-                value={receiptText}
-                onChange={(e) => setReceiptText(e.target.value)}
-                placeholder="cth: Suka makanan kami? Scan QR ini untuk berbagi ulasan jujur di Google Maps!"
-                className="w-full rounded-xl border border-brand-amber-soft bg-white px-3 py-2 text-xs text-brand-brown focus:border-brand-orange focus:outline-none"
-              />
-            </div>
-
-            <div>
-              <label className="mb-1.5 block text-xs font-semibold text-brand-brown/80">
-                Gambar / Kode pada Promo Section (Pilih Salah Satu)
-              </label>
-              <div className="grid grid-cols-3 gap-1.5 rounded-xl bg-white p-1 border border-brand-amber-soft">
-                {(
-                  [
-                    { key: 'NONE', label: 'Tanpa Gambar' },
-                    { key: 'QR', label: 'QR Code' },
-                    { key: 'BARCODE', label: 'Barcode' },
-                  ] as const
-                ).map((opt) => (
-                  <button
-                    key={opt.key}
-                    type="button"
-                    onClick={() => {
-                      setMediaType(opt.key);
-                      if (opt.key === 'NONE') setMediaValue('');
-                    }}
-                    className={`h-9 rounded-lg text-xs font-bold transition ${
-                      mediaType === opt.key
-                        ? 'bg-brand-orange text-white shadow-sm'
-                        : 'text-brand-brown/75 hover:bg-brand-cream'
-                    }`}
-                  >
-                    {opt.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {mediaType === 'QR' && (
-              <div>
-                <label className="mb-1 block text-xs font-semibold text-brand-brown/80">
-                  Link / Teks QR Code (cth: link Google Maps Review)
-                </label>
-                <input
-                  type="text"
-                  maxLength={500}
-                  value={mediaValue}
-                  onChange={(e) => setMediaValue(e.target.value)}
-                  placeholder="https://g.page/r/xxxx/review"
-                  className="h-10 w-full rounded-xl border border-brand-amber-soft bg-white px-3 text-xs text-brand-brown focus:border-brand-orange focus:outline-none"
-                />
-              </div>
-            )}
-
-            {mediaType === 'BARCODE' && (
-              <div>
-                <label className="mb-1 block text-xs font-semibold text-brand-brown/80">
-                  Nilai Barcode CODE128 (ASCII, maks. 48 karakter)
-                </label>
-                <input
-                  type="text"
-                  maxLength={48}
-                  value={mediaValue}
-                  onChange={(e) => setMediaValue(e.target.value)}
-                  placeholder="cth: PROMO-NASIUDUK22"
-                  className="h-10 w-full rounded-xl border border-brand-amber-soft bg-white px-3 font-mono text-xs text-brand-brown focus:border-brand-orange focus:outline-none"
-                />
-              </div>
             )}
           </div>
         </form>

@@ -63,14 +63,11 @@ Aplikasi web POS & kontrol stok harian untuk **Nasi Uduk 22 Kosambi - Mpok Indri
 - **Kategori Pengeluaran Dinamis (`expense_categories`)**: Kategori dapat ditambah, diubah nama (otomatis memperbarui label pada catatan pengeluaran), dan dinonaktifkan tanpa menghapus histori.
 - **Grafik Perbandingan Persentase Kategori**: Visualisasi *stacked bar* dan rincian persentase per kategori pengeluaran beserta input nominal berpemisah ribuan.
 
-### 7. Promo Berbasis Kuota & Promo Section Struk (Tab Khusus Pemilik & Admin)
+### 7. Promo Diskon Berbasis Kuota & Jadwal (Tab Khusus Pemilik & Admin)
 - **Konfigurasi Promo (Tab `Promo` untuk Pemilik & Admin):**
-  - Mendukung potongan **Nominal (`FIXED` Rp)** maupun **Persentase (`PERCENT` % + batas maksimal Rp)**, minimal belanja, rentang tanggal opsional, dan pembatasan saluran (`Khusus Regular` atau semua channel).
-  - **Kuota Pelanggan Terbatas (`quota_limit > 0`, wajib diisi):** Setiap promo wajib memiliki batas kuota anggaran (mis. *"Promo 50 Pelanggan Pertama"*) yang dijaga secara atomik $O(1)$ (`used_count < quota_limit`) melalui tabel terpisah `applied_promotions` (kuota otomatis kembali jika promo dihapus atau nota dibatalkan/`VOIDED`).
-- **Promo Section Kondisional di Struk 58mm:**
-  - Setiap promo memiliki pengaturan **Promo Section** (teks kecil opsional + pilihan tunggal: **Tanpa Gambar**, **QR Code** ESC/POS `GS ( k`, atau **Barcode CODE128** ESC/POS `GS k`).
-  - **Hanya tercetak saat promo diterapkan pada nota**; nota tanpa promo berhenti di footer normal.
-- **Penerapan Kasir & Laporan:** Kasir menerapkan/menghapus promo pada nota `UNPAID` sebelum menekan **Tandai Lunas**; rekap total diskon & pemakaian promo tampil di **Laporan Harian**.
+  - Mendukung potongan **Nominal (`FIXED` Rp)** maupun **Persentase (`PERCENT` % + batas maksimal Rp)**, minimal belanja, rentang tanggal & jam (`start_at`–`end_at`), jadwal berulang per hari/jam (`promotion_schedules` untuk *Happy Hour*, *Sarapan Pagi*, *Jumat Berkah*), dan pembatasan saluran (`Khusus Regular` atau semua channel).
+  - **Kuota Pelanggan Terbatas (`quota_limit > 0`, wajib diisi):** Setiap promo wajib memiliki batas kuota anggaran (mis. *"Promo 50 Pelanggan Pertama"*) yang dijaga secara atomik $O(1)$ (`used_count < quota_limit`) melalui tabel terpisah `applied_promotions` (kuota otomatis kembali jika promo dihapus atau nota dibatalkan/`VOIDED`, dengan histori tetap tersimpan sebagai `VOIDED`).
+- **Penerapan Kasir & Laporan:** Kasir menerapkan/menghapus promo pada nota `UNPAID` tepat sebelum menekan **Tandai Lunas**; rekap total diskon & pemakaian promo tampil di **Laporan Harian**.
 
 ### 8. Laporan Harian & Analitik Performa
 - **Laporan Harian**: Navigasi stepper tanggal (`<` / `>` / Hari Ini), rekap omzet lunas, belum bayar, void, pengeluaran, **Laba Bersih**, rekonsiliasi stok (awal/restock/terjual/selisih opname fisik), drill-down riwayat mutasi stok, serta **Export CSV**.

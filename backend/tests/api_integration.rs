@@ -1874,12 +1874,12 @@ async fn test_quota_promotions_and_receipt_promo_section() {
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 
-    // 2. Validation checks: invalid media value for QR/BARCODE (including '{'), quota_limit <= 0, pct > 100
+    // 2. Validation checks: quota_limit <= 0, pct > 100, invalid schedule
     for bad in [
-        json!({ "name": "No QR", "discount_type": "FIXED", "discount_value": 5000, "quota_limit": 10, "receipt_media_type": "QR", "receipt_media_value": "" }),
-        json!({ "name": "Bad Barcode", "discount_type": "FIXED", "discount_value": 5000, "quota_limit": 10, "receipt_media_type": "BARCODE", "receipt_media_value": "BAD{B123" }),
         json!({ "name": "Zero Quota", "discount_type": "FIXED", "discount_value": 5000, "quota_limit": 0 }),
         json!({ "name": "Bad Pct", "discount_type": "PERCENT", "discount_value": 101, "quota_limit": 10 }),
+        json!({ "name": "Bad Day", "discount_type": "FIXED", "discount_value": 5000, "quota_limit": 10, "schedules": [{ "day_of_week": 7, "start_time": "14:00", "end_time": "17:00" }] }),
+        json!({ "name": "Inverted Time", "discount_type": "FIXED", "discount_value": 5000, "quota_limit": 10, "schedules": [{ "day_of_week": 4, "start_time": "17:00", "end_time": "14:00" }] }),
     ] {
         let (status, _, _) = send_json_with_cookie(
             &app,
@@ -1892,7 +1892,7 @@ async fn test_quota_promotions_and_receipt_promo_section() {
         assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
-    // 3. Create quota=1 FIXED promo with QR Promo Section + PERCENT promo with BARCODE
+    // 3. Create quota=1 FIXED promo + PERCENT promo
     let (status, promo_val, _) = send_json_with_cookie(
         &app,
         Method::POST,
@@ -1904,10 +1904,7 @@ async fn test_quota_promotions_and_receipt_promo_section() {
             "discount_value": 5000,
             "min_order_amount": 20000,
             "quota_limit": 1,
-            "regular_only": true,
-            "receipt_promo_text": "Scan QR untuk ulasan jujur di Google Maps!",
-            "receipt_media_type": "QR",
-            "receipt_media_value": "https://g.page/r/test/review"
+            "regular_only": true
         })),
     )
     .await;
@@ -1916,7 +1913,6 @@ async fn test_quota_promotions_and_receipt_promo_section() {
     assert_eq!(promo.quota_limit, 1);
     assert_eq!(promo.used_count, 0);
     assert_eq!(promo.remaining_quota, 1);
-    assert_eq!(promo.receipt_media_type, "QR");
 
     let (status, pct_val, _) = send_json_with_cookie(
         &app,
@@ -1930,16 +1926,34 @@ async fn test_quota_promotions_and_receipt_promo_section() {
             "max_discount": 6000,
             "min_order_amount": 0,
             "quota_limit": 5,
-            "regular_only": true,
-            "receipt_promo_text": "Simpan struk ini untuk kunjungan berikutnya",
-            "receipt_media_type": "BARCODE",
-            "receipt_media_value": "ND22-VOUCHER-01"
+            "regular_only": true
         })),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
     let pct_promo: PromotionResponse = serde_json::from_value(pct_val).unwrap();
-    assert_eq!(pct_promo.receipt_media_type, "BARCODE");
+
+    // Also test future start_at + schedule promo gets rejected at apply time (409)
+    let (status, fut_val, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/promotions",
+        Some(&admin_cookie),
+        Some(json!({
+            "name": "Jumat Berkah Masa Depan",
+            "discount_type": "FIXED",
+            "discount_value": 3000,
+            "quota_limit": 10,
+            "start_at": "2099-01-01T11:00",
+            "end_at": "2099-01-31T14:00",
+            "schedules": [{ "day_of_week": 4, "start_time": "11:00", "end_time": "14:00" }]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let fut_promo: PromotionResponse = serde_json::from_value(fut_val).unwrap();
+    assert_eq!(fut_promo.schedules.len(), 1);
+    assert_eq!(fut_promo.schedules[0].day_of_week, 4);
 
     // 4. Open store & create 2 Regular UNPAID orders (order1=18k below min, order2=36k eligible, order3=40k)
     let stk = create_stock(&app, &admin_cookie, "Nasi Uduk Promo", "porsi").await;
@@ -2026,11 +2040,6 @@ async fn test_quota_promotions_and_receipt_promo_section() {
     assert_eq!(applied.total_amount, 31000);
     assert_eq!(applied.applied_promotions.len(), 1);
     assert_eq!(applied.applied_promotions[0].promo_id, promo.id);
-    assert_eq!(applied.applied_promotions[0].receipt_media_type, "QR");
-    assert_eq!(
-        applied.applied_promotions[0].receipt_media_value,
-        "https://g.page/r/test/review"
-    );
 
     // Applying same quota=1 promo to order_b must fail (409 Conflict: quota exhausted!)
     let (status, _, _) = send_json_with_cookie(
@@ -2082,7 +2091,87 @@ async fn test_quota_promotions_and_receipt_promo_section() {
     assert_eq!(pct_applied.discount_amount, 6000);
     assert_eq!(pct_applied.total_amount, 30000);
     assert_eq!(pct_applied.applied_promotions.len(), 1);
-    assert_eq!(pct_applied.applied_promotions[0].receipt_media_type, "BARCODE");
+    assert_eq!(pct_applied.applied_promotions[0].promo_id, pct_promo.id);
+
+    // Future start_at promo must be rejected (409 Conflict)
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        &format!("/api/orders/{}/promo", order_small.id),
+        Some(&cashier_cookie),
+        Some(json!({ "promo_id": fut_promo.id })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    // Runtime schedule enforcement: wrong weekday -> 409; updated to today 00:00-23:59 -> 200
+    let (_, today_dow, _) = nota_digital_backend::db::now_local_schedule_clock();
+    let other_dow = (today_dow + 1) % 7;
+    let (status, sched_val, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/promotions",
+        Some(&admin_cookie),
+        Some(json!({
+            "name": "Promo Jadwal Khusus",
+            "discount_type": "FIXED",
+            "discount_value": 2000,
+            "quota_limit": 5,
+            "schedules": [{ "day_of_week": other_dow, "start_time": "00:00", "end_time": "23:59" }]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let sched_promo: PromotionResponse = serde_json::from_value(sched_val).unwrap();
+
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        &format!("/api/orders/{}/promo", order_small.id),
+        Some(&cashier_cookie),
+        Some(json!({ "promo_id": sched_promo.id })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::PUT,
+        &format!("/api/promotions/{}", sched_promo.id),
+        Some(&admin_cookie),
+        Some(json!({
+            "name": "Promo Jadwal Khusus",
+            "discount_type": "FIXED",
+            "discount_value": 2000,
+            "min_order_amount": 0,
+            "quota_limit": 5,
+            "schedules": [{ "day_of_week": today_dow, "start_time": "00:00", "end_time": "23:59" }],
+            "regular_only": true,
+            "is_active": true
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        &format!("/api/orders/{}/promo", order_small.id),
+        Some(&cashier_cookie),
+        Some(json!({ "promo_id": sched_promo.id })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    // Clean up promo from order_small so daily report assertions below remain untouched
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::DELETE,
+        &format!("/api/orders/{}/promo", order_small.id),
+        Some(&cashier_cookie),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
 
     // Pay both orders; once PAID, promo cannot be removed (409)
     for oid in [order_a.id, order_b.id] {
@@ -2135,9 +2224,6 @@ async fn test_quota_promotions_and_receipt_promo_section() {
             "min_order_amount": 0,
             "quota_limit": 1,
             "regular_only": true,
-            "receipt_promo_text": "Simpan struk ini",
-            "receipt_media_type": "BARCODE",
-            "receipt_media_value": "ND22-VOUCHER-01",
             "is_active": true
         })),
     )
@@ -2179,5 +2265,5 @@ async fn test_quota_promotions_and_receipt_promo_section() {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(cnt, 2);
+    assert_eq!(cnt, 4);
 }

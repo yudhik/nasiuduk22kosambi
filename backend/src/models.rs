@@ -291,6 +291,22 @@ pub struct UpdateExpenseCategoryRequest {
 // ===== Promotions =====
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct PromotionSchedule {
+    pub id: i64,
+    pub promo_id: i64,
+    pub day_of_week: i64,
+    pub start_time: String,
+    pub end_time: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromotionScheduleInput {
+    pub day_of_week: i64,
+    pub start_time: String,
+    pub end_time: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct PromotionRow {
     pub id: i64,
     pub name: String,
@@ -300,12 +316,9 @@ pub struct PromotionRow {
     pub min_order_amount: i64,
     pub quota_limit: i64,
     pub used_count: i64,
-    pub start_date: Option<String>,
-    pub end_date: Option<String>,
+    pub start_at: Option<String>,
+    pub end_at: Option<String>,
     pub regular_only: i64,
-    pub receipt_promo_text: String,
-    pub receipt_media_type: String,
-    pub receipt_media_value: String,
     pub is_active: i64,
     pub created_at: String,
     pub updated_at: String,
@@ -322,19 +335,17 @@ pub struct PromotionResponse {
     pub quota_limit: i64,
     pub used_count: i64,
     pub remaining_quota: i64,
-    pub start_date: Option<String>,
-    pub end_date: Option<String>,
+    pub start_at: Option<String>,
+    pub end_at: Option<String>,
+    pub schedules: Vec<PromotionSchedule>,
     pub regular_only: bool,
-    pub receipt_promo_text: String,
-    pub receipt_media_type: String,
-    pub receipt_media_value: String,
     pub is_active: bool,
     pub created_at: String,
     pub updated_at: String,
 }
 
-impl From<PromotionRow> for PromotionResponse {
-    fn from(row: PromotionRow) -> Self {
+impl PromotionResponse {
+    pub fn from_parts(row: PromotionRow, schedules: Vec<PromotionSchedule>) -> Self {
         let remaining_quota = row.quota_limit.saturating_sub(row.used_count);
         Self {
             id: row.id,
@@ -346,12 +357,10 @@ impl From<PromotionRow> for PromotionResponse {
             quota_limit: row.quota_limit,
             used_count: row.used_count,
             remaining_quota,
-            start_date: row.start_date,
-            end_date: row.end_date,
+            start_at: row.start_at,
+            end_at: row.end_at,
+            schedules,
             regular_only: row.regular_only != 0,
-            receipt_promo_text: row.receipt_promo_text,
-            receipt_media_type: row.receipt_media_type,
-            receipt_media_value: row.receipt_media_value,
             is_active: row.is_active != 0,
             created_at: row.created_at,
             updated_at: row.updated_at,
@@ -367,12 +376,10 @@ pub struct CreatePromotionRequest {
     pub max_discount: Option<i64>,
     pub min_order_amount: Option<i64>,
     pub quota_limit: i64,
-    pub start_date: Option<String>,
-    pub end_date: Option<String>,
+    pub start_at: Option<String>,
+    pub end_at: Option<String>,
+    pub schedules: Option<Vec<PromotionScheduleInput>>,
     pub regular_only: Option<bool>,
-    pub receipt_promo_text: Option<String>,
-    pub receipt_media_type: Option<String>,
-    pub receipt_media_value: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -383,12 +390,10 @@ pub struct UpdatePromotionRequest {
     pub max_discount: Option<i64>,
     pub min_order_amount: i64,
     pub quota_limit: i64,
-    pub start_date: Option<String>,
-    pub end_date: Option<String>,
+    pub start_at: Option<String>,
+    pub end_at: Option<String>,
+    pub schedules: Option<Vec<PromotionScheduleInput>>,
     pub regular_only: bool,
-    pub receipt_promo_text: String,
-    pub receipt_media_type: String,
-    pub receipt_media_value: String,
     pub is_active: bool,
 }
 
@@ -405,9 +410,6 @@ pub struct AppliedPromotionDetail {
     pub promo_name_snapshot: String,
     pub discount_amount: i64,
     pub applied_by_username: String,
-    pub receipt_text_snapshot: String,
-    pub receipt_media_type: String,
-    pub receipt_media_value: String,
     pub status: String,
     pub created_at: String,
 }

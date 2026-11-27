@@ -514,9 +514,6 @@ struct BackupAppliedPromotionRow {
     promo_name_snapshot: String,
     discount_amount: i64,
     applied_by_username: String,
-    receipt_text_snapshot: String,
-    receipt_media_type: String,
-    receipt_media_value: String,
     status: String,
     created_at: String,
 }
@@ -744,8 +741,7 @@ pub async fn reset_store_day(
     let applied_promotions: Vec<BackupAppliedPromotionRow> = sqlx::query_as(
         r#"
         SELECT ap.id, ap.order_id, ap.promo_id, ap.promo_name_snapshot, ap.discount_amount,
-               ap.applied_by_username, ap.receipt_text_snapshot, ap.receipt_media_type,
-               ap.receipt_media_value, ap.status, ap.created_at
+               ap.applied_by_username, ap.status, ap.created_at
         FROM applied_promotions ap
         INNER JOIN orders o ON o.id = ap.order_id
         WHERE o.business_date = ?
@@ -927,16 +923,13 @@ pub async fn reset_store_day(
     for ap in &applied_promotions {
         let _ = writeln!(
             sql,
-            "INSERT INTO applied_promotions (id, order_id, promo_id, promo_name_snapshot, discount_amount, applied_by_username, receipt_text_snapshot, receipt_media_type, receipt_media_value, status, created_at) VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {});",
+            "INSERT INTO applied_promotions (id, order_id, promo_id, promo_name_snapshot, discount_amount, applied_by_username, status, created_at) VALUES ({}, {}, {}, {}, {}, {}, {}, {});",
             ap.id,
             ap.order_id,
             ap.promo_id,
             sql_text(&ap.promo_name_snapshot),
             ap.discount_amount,
             sql_text(&ap.applied_by_username),
-            sql_text(&ap.receipt_text_snapshot),
-            sql_text(&ap.receipt_media_type),
-            sql_text(&ap.receipt_media_value),
             sql_text(&ap.status),
             sql_text(&ap.created_at),
         );
