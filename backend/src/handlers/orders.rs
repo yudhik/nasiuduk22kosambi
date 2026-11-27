@@ -16,8 +16,9 @@ use crate::{
     },
     error::{AppError, AppResult},
     models::{
-        CreateOrderRequest, MenuItemRow, OrderDetail, OrderItemDetail, OrderRow, SalesChannel,
-        StockItem, VoidOrderRequest,
+        AppliedPromotionDetail, ApplyOrderPromoRequest, CreateOrderRequest, MenuItemRow,
+        OrderDetail, OrderItemDetail, OrderRow, PromotionRow, SalesChannel, StockItem,
+        VoidOrderRequest,
     },
     AppState,
 };
@@ -244,9 +245,9 @@ pub async fn create_order(
         INSERT INTO orders (
             order_number, business_date, channel_id, channel_name_snapshot,
             customer_label, waiter_name, created_by_user_id, notes, status,
-            total_amount, created_at, paid_at
+            subtotal_amount, discount_amount, total_amount, created_at, paid_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
         "#,
     )
     .bind(&order_number)
@@ -258,6 +259,7 @@ pub async fn create_order(
     .bind(auth.id)
     .bind(&notes)
     .bind(initial_status)
+    .bind(total_amount)
     .bind(total_amount)
     .bind(&now)
     .bind(paid_at)
@@ -381,17 +383,19 @@ pub async fn create_order(
         .bind(order_id)
         .fetch_one(&mut *tx)
         .await?;
-    let order_items: Vec<OrderItemDetail> =
-        sqlx::query_as("SELECT * FROM order_items WHERE order_id = ? ORDER BY id ASC")
-            .bind(order_id)
-            .fetch_all(&mut *tx)
-            .await?;
+    if order_row.status == "PAID" {
+        let _ = crate::handlers::vouchers::auto_issue_voucher_for_paid_order_tx(
+            &mut tx,
+            &order_row,
+            &auth.username,
+            &now,
+        )
+        .await?;
+    }
+    let detail = crate::handlers::vouchers::load_order_detail_tx(&mut tx, order_id).await?;
 
     tx.commit().await?;
-    Ok((
-        StatusCode::CREATED,
-        Json(OrderDetail::from_parts(order_row, order_items)),
-    ))
+    Ok((StatusCode::CREATED, Json(detail)))
 }
 
 pub async fn list_orders(
@@ -509,16 +513,76 @@ pub async fn list_orders(
         return Ok(Json(Vec::new()));
     }
 
+    let all_applied_promos: Vec<AppliedPromotionDetail> = sqlx::query_as(
+        r#"
+        SELECT ap.*
+        FROM applied_promotions ap
+        INNER JOIN orders o ON o.id = ap.order_id
+        WHERE o.business_date = ? AND ap.status = 'APPLIED'
+        ORDER BY ap.id ASC
+        "#,
+    )
+    .bind(&business_date)
+    .fetch_all(&state.pool)
+    .await?;
+
+    let all_applied_vouchers: Vec<crate::models::AppliedVoucherDetail> = sqlx::query_as(
+        r#"
+        SELECT av.*
+        FROM applied_vouchers av
+        INNER JOIN orders o ON o.id = av.order_id
+        WHERE o.business_date = ? AND av.status = 'APPLIED'
+        ORDER BY av.id ASC
+        "#,
+    )
+    .bind(&business_date)
+    .fetch_all(&state.pool)
+    .await?;
+
+    let all_issued_vouchers: Vec<crate::models::IssuedVoucherDetail> = sqlx::query_as(
+        r#"
+        SELECT iv.*
+        FROM issued_vouchers iv
+        INNER JOIN orders o ON o.id = iv.source_order_id
+        WHERE o.business_date = ? AND iv.status != 'VOIDED'
+        ORDER BY iv.id ASC
+        "#,
+    )
+    .bind(&business_date)
+    .fetch_all(&state.pool)
+    .await?;
+
     let mut items_by_order: HashMap<i64, Vec<OrderItemDetail>> = HashMap::new();
     for item in all_items {
         items_by_order.entry(item.order_id).or_default().push(item);
+    }
+
+    let mut promos_by_order: HashMap<i64, Vec<AppliedPromotionDetail>> = HashMap::new();
+    for ap in all_applied_promos {
+        promos_by_order.entry(ap.order_id).or_default().push(ap);
+    }
+
+    let mut vouchers_by_order: HashMap<i64, Vec<crate::models::AppliedVoucherDetail>> =
+        HashMap::new();
+    for av in all_applied_vouchers {
+        vouchers_by_order.entry(av.order_id).or_default().push(av);
+    }
+
+    let mut issued_by_order: HashMap<i64, Vec<crate::models::IssuedVoucherDetail>> = HashMap::new();
+    for iv in all_issued_vouchers {
+        if let Some(oid) = iv.source_order_id {
+            issued_by_order.entry(oid).or_default().push(iv);
+        }
     }
 
     let details = orders
         .into_iter()
         .map(|o| {
             let items = items_by_order.remove(&o.id).unwrap_or_default();
-            OrderDetail::from_parts(o, items)
+            let promos = promos_by_order.remove(&o.id).unwrap_or_default();
+            let vouchers = vouchers_by_order.remove(&o.id).unwrap_or_default();
+            let issued = issued_by_order.remove(&o.id).unwrap_or_default();
+            OrderDetail::from_parts(o, items, promos, vouchers, issued)
         })
         .collect();
 
@@ -531,19 +595,18 @@ pub async fn get_order(
     Path(id): Path<i64>,
 ) -> AppResult<Json<OrderDetail>> {
     auth.require_roles(&[Role::Cashier, Role::Owner, Role::Admin])?;
-    let order: Option<OrderRow> = sqlx::query_as("SELECT * FROM orders WHERE id = ?")
+    let mut tx = state.pool.begin().await?;
+    let exists: Option<(i64,)> = sqlx::query_as("SELECT id FROM orders WHERE id = ?")
         .bind(id)
-        .fetch_optional(&state.pool)
+        .fetch_optional(&mut *tx)
         .await?;
+    if exists.is_none() {
+        return Err(AppError::NotFound(format!("Nota #{id} tidak ditemukan")));
+    }
+    let detail = crate::handlers::vouchers::load_order_detail_tx(&mut tx, id).await?;
+    tx.commit().await?;
 
-    let order = order.ok_or_else(|| AppError::NotFound(format!("Nota #{id} tidak ditemukan")))?;
-    let items: Vec<OrderItemDetail> =
-        sqlx::query_as("SELECT * FROM order_items WHERE order_id = ? ORDER BY id ASC")
-            .bind(id)
-            .fetch_all(&state.pool)
-            .await?;
-
-    Ok(Json(OrderDetail::from_parts(order, items)))
+    Ok(Json(detail))
 }
 
 pub async fn pay_order(
@@ -586,18 +649,265 @@ pub async fn pay_order(
         .execute(&mut *tx)
         .await?;
 
-    let updated: OrderRow = sqlx::query_as("SELECT * FROM orders WHERE id = ?")
+    let updated_row: OrderRow = sqlx::query_as("SELECT * FROM orders WHERE id = ?")
         .bind(id)
         .fetch_one(&mut *tx)
         .await?;
-    let items: Vec<OrderItemDetail> =
-        sqlx::query_as("SELECT * FROM order_items WHERE order_id = ? ORDER BY id ASC")
-            .bind(id)
-            .fetch_all(&mut *tx)
-            .await?;
+    let _ = crate::handlers::vouchers::auto_issue_voucher_for_paid_order_tx(
+        &mut tx,
+        &updated_row,
+        &auth.username,
+        &now,
+    )
+    .await?;
+    let detail = crate::handlers::vouchers::load_order_detail_tx(&mut tx, id).await?;
 
     tx.commit().await?;
-    Ok(Json(OrderDetail::from_parts(updated, items)))
+    Ok(Json(detail))
+}
+
+pub async fn apply_order_promo(
+    auth: AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(req): Json<ApplyOrderPromoRequest>,
+) -> AppResult<Json<OrderDetail>> {
+    auth.require_roles(&[Role::Cashier, Role::Owner, Role::Admin])?;
+    let (_today, now) = now_business_and_iso();
+    let (now_dt, now_dow, now_hhmm) = crate::db::now_local_schedule_clock();
+    let mut tx = begin_write_tx(&state.pool).await?;
+
+    let order: OrderRow = sqlx::query_as("SELECT * FROM orders WHERE id = ?")
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("Nota #{id} tidak ditemukan")))?;
+
+    let day_status = get_store_day_status_tx(&mut tx, &order.business_date).await?;
+    if day_status == "CLOSED" {
+        return Err(AppError::Conflict(
+            "Toko untuk tanggal nota ini sudah ditutup.".into(),
+        ));
+    }
+    if order.status != "UNPAID" {
+        return Err(AppError::Conflict(
+            "Promo hanya dapat diterapkan pada nota yang BELUM BAYAR.".into(),
+        ));
+    }
+
+    // Release any previously applied promo on this UNPAID order first (so switching or re-applying is atomic)
+    let prev_promos: Vec<(i64,)> = sqlx::query_as(
+        "SELECT promo_id FROM applied_promotions WHERE order_id = ? AND status = 'APPLIED'",
+    )
+    .bind(order.id)
+    .fetch_all(&mut *tx)
+    .await?;
+    if !prev_promos.is_empty() {
+        sqlx::query(
+            "UPDATE applied_promotions SET status = 'VOIDED' WHERE order_id = ? AND status = 'APPLIED'",
+        )
+        .bind(order.id)
+        .execute(&mut *tx)
+        .await?;
+        for (old_pid,) in prev_promos {
+            sqlx::query(
+                "UPDATE promotions SET used_count = MAX(0, used_count - 1), updated_at = ? WHERE id = ?",
+            )
+            .bind(&now)
+            .bind(old_pid)
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
+
+    let promo: PromotionRow = sqlx::query_as("SELECT * FROM promotions WHERE id = ?")
+        .bind(req.promo_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("Promo #{} tidak ditemukan", req.promo_id)))?;
+
+    if promo.is_active == 0 {
+        return Err(AppError::Conflict("Promo ini sudah tidak aktif.".into()));
+    }
+
+    if let Some(ref start) = promo.start_at {
+        if now_dt.as_str() < start.as_str() {
+            return Err(AppError::Conflict(format!(
+                "Promo ini baru berlaku mulai {}.",
+                start.replace('T', " ")
+            )));
+        }
+    }
+    if let Some(ref end) = promo.end_at {
+        if now_dt.as_str() > end.as_str() {
+            return Err(AppError::Conflict(format!(
+                "Promo ini sudah berakhir pada {}.",
+                end.replace('T', " ")
+            )));
+        }
+    }
+
+    let schedules: Vec<crate::models::PromotionSchedule> = sqlx::query_as(
+        "SELECT * FROM promotion_schedules WHERE promo_id = ? ORDER BY day_of_week ASC, start_time ASC",
+    )
+    .bind(promo.id)
+    .fetch_all(&mut *tx)
+    .await?;
+
+    if !schedules.is_empty() {
+        let in_schedule = schedules.iter().any(|s| {
+            s.day_of_week == now_dow
+                && now_hhmm.as_str() >= s.start_time.as_str()
+                && now_hhmm.as_str() <= s.end_time.as_str()
+        });
+        if !in_schedule {
+            return Err(AppError::Conflict(format!(
+                "Promo ini tidak berlaku pada hari/jam sekarang ({now_hhmm})."
+            )));
+        }
+    }
+
+    if promo.regular_only != 0 {
+        let is_regular = if let Some(cid) = order.channel_id {
+            let code: Option<(String,)> =
+                sqlx::query_as("SELECT code FROM sales_channels WHERE id = ?")
+                    .bind(cid)
+                    .fetch_optional(&mut *tx)
+                    .await?;
+            code.map(|(c,)| c.eq_ignore_ascii_case("regular"))
+                .unwrap_or(false)
+        } else {
+            order.channel_name_snapshot.eq_ignore_ascii_case("regular")
+        };
+        if !is_regular {
+            return Err(AppError::Conflict(
+                "Promo ini hanya berlaku untuk saluran Regular (makan di tempat / bungkus)."
+                    .into(),
+            ));
+        }
+    }
+
+    if order.subtotal_amount < promo.min_order_amount {
+        return Err(AppError::Validation(format!(
+            "Minimal belanja untuk promo ini adalah Rp{}.",
+            promo.min_order_amount
+        )));
+    }
+
+    // O(1) atomic quota claim — no SELECT COUNT(*) scan inside write lock
+    let claim_res = sqlx::query(
+        "UPDATE promotions SET used_count = used_count + 1, updated_at = ? WHERE id = ? AND is_active = 1 AND used_count < quota_limit",
+    )
+    .bind(&now)
+    .bind(promo.id)
+    .execute(&mut *tx)
+    .await?;
+
+    if claim_res.rows_affected() == 0 {
+        return Err(AppError::Conflict(format!(
+            "Kuota promo \"{}\" sudah habis ({}/{}).",
+            promo.name, promo.used_count, promo.quota_limit
+        )));
+    }
+
+    let discount_amount = crate::handlers::vouchers::compute_discount(
+        order.subtotal_amount,
+        &promo.discount_type,
+        promo.discount_value,
+        promo.max_discount,
+    );
+
+    sqlx::query(
+        r#"
+        INSERT INTO applied_promotions (
+            order_id, promo_id, promo_name_snapshot, discount_amount,
+            applied_by_username, status, created_at
+        )
+        VALUES (?, ?, ?, ?, ?, 'APPLIED', ?)
+        "#,
+    )
+    .bind(order.id)
+    .bind(promo.id)
+    .bind(&promo.name)
+    .bind(discount_amount)
+    .bind(&auth.username)
+    .bind(&now)
+    .execute(&mut *tx)
+    .await?;
+
+    crate::handlers::vouchers::recalculate_order_totals_tx(&mut tx, order.id, order.subtotal_amount)
+        .await?;
+    let detail = crate::handlers::vouchers::load_order_detail_tx(&mut tx, order.id).await?;
+
+    tx.commit().await?;
+    tracing::info!(
+        actor = %auth.username,
+        order_id = order.id,
+        promo_id = promo.id,
+        discount_amount,
+        "promo applied to order"
+    );
+    Ok(Json(detail))
+}
+
+pub async fn remove_order_promo(
+    auth: AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> AppResult<Json<OrderDetail>> {
+    auth.require_roles(&[Role::Cashier, Role::Owner, Role::Admin])?;
+    let (_today, now) = now_business_and_iso();
+    let mut tx = begin_write_tx(&state.pool).await?;
+
+    let order: OrderRow = sqlx::query_as("SELECT * FROM orders WHERE id = ?")
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("Nota #{id} tidak ditemukan")))?;
+
+    let day_status = get_store_day_status_tx(&mut tx, &order.business_date).await?;
+    if day_status == "CLOSED" {
+        return Err(AppError::Conflict(
+            "Toko untuk tanggal nota ini sudah ditutup.".into(),
+        ));
+    }
+    if order.status != "UNPAID" {
+        return Err(AppError::Conflict(
+            "Promo hanya dapat dihapus pada nota yang BELUM BAYAR.".into(),
+        ));
+    }
+
+    let prev_promos: Vec<(i64,)> = sqlx::query_as(
+        "SELECT promo_id FROM applied_promotions WHERE order_id = ? AND status = 'APPLIED'",
+    )
+    .bind(order.id)
+    .fetch_all(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "UPDATE applied_promotions SET status = 'VOIDED' WHERE order_id = ? AND status = 'APPLIED'",
+    )
+    .bind(order.id)
+    .execute(&mut *tx)
+    .await?;
+
+    for (old_pid,) in prev_promos {
+        sqlx::query(
+            "UPDATE promotions SET used_count = MAX(0, used_count - 1), updated_at = ? WHERE id = ?",
+        )
+        .bind(&now)
+        .bind(old_pid)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    crate::handlers::vouchers::recalculate_order_totals_tx(&mut tx, order.id, order.subtotal_amount)
+        .await?;
+    let detail = crate::handlers::vouchers::load_order_detail_tx(&mut tx, order.id).await?;
+
+    tx.commit().await?;
+    tracing::info!(actor = %auth.username, order_id = order.id, "promo removed from order");
+    Ok(Json(detail))
 }
 
 pub async fn void_order(
@@ -648,12 +958,7 @@ pub async fn void_order(
         _ => return Err(AppError::Conflict("Status nota tidak valid".into())),
     }
 
-    let items: Vec<OrderItemDetail> =
-        sqlx::query_as("SELECT * FROM order_items WHERE order_id = ? ORDER BY id ASC")
-            .bind(id)
-            .fetch_all(&mut *tx)
-            .await?;
-
+    let _ = reason;
     // Only restore into live `stock_items.current_stock` if the order belongs to today AND today is OPEN
     // (prevents cross-day voiding from ever corrupting today's live inventory)
     let is_live_today = order.business_date == today && day_status == "OPEN";
@@ -732,6 +1037,31 @@ pub async fn void_order(
         .await?;
     }
 
+    // Void any applied promotions on this order and restore their quota slots atomically
+    let voided_promos: Vec<(i64,)> = sqlx::query_as(
+        "SELECT promo_id FROM applied_promotions WHERE order_id = ? AND status = 'APPLIED'",
+    )
+    .bind(id)
+    .fetch_all(&mut *tx)
+    .await?;
+    if !voided_promos.is_empty() {
+        sqlx::query(
+            "UPDATE applied_promotions SET status = 'VOIDED' WHERE order_id = ? AND status = 'APPLIED'",
+        )
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+        for (pid,) in voided_promos {
+            sqlx::query(
+                "UPDATE promotions SET used_count = MAX(0, used_count - 1), updated_at = ? WHERE id = ?",
+            )
+            .bind(&now)
+            .bind(pid)
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
+
     sqlx::query(
         "UPDATE orders SET status = 'VOIDED', voided_at = ?, void_reason = ? WHERE id = ?",
     )
@@ -741,11 +1071,9 @@ pub async fn void_order(
     .execute(&mut *tx)
     .await?;
 
-    let updated: OrderRow = sqlx::query_as("SELECT * FROM orders WHERE id = ?")
-        .bind(id)
-        .fetch_one(&mut *tx)
-        .await?;
+    crate::handlers::vouchers::void_order_vouchers_tx(&mut tx, id, &now).await?;
+    let detail = crate::handlers::vouchers::load_order_detail_tx(&mut tx, id).await?;
 
     tx.commit().await?;
-    Ok(Json(OrderDetail::from_parts(updated, items)))
+    Ok(Json(detail))
 }

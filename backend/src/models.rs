@@ -171,6 +171,8 @@ pub struct StoreStatusResponse {
     pub closed_at: Option<String>,
     pub closed_by_username: Option<String>,
     pub unpaid_order_count: i64,
+    pub pending_prior_date: Option<String>,
+    pub pending_prior_unpaid_count: i64,
     pub closing_summary: Option<StoreDayRow>,
 }
 
@@ -213,6 +215,9 @@ pub struct ReceiptSettings {
     pub footer_text: String,
     pub header_bold: bool,
     pub header_font_size: String,
+    pub review_enabled: bool,
+    pub review_text: String,
+    pub review_url: String,
     pub updated_at: String,
     pub updated_by_username: String,
 }
@@ -225,6 +230,12 @@ pub struct UpdateReceiptSettingsRequest {
     pub header_bold: bool,
     #[serde(default = "default_header_font_size")]
     pub header_font_size: String,
+    #[serde(default)]
+    pub review_enabled: bool,
+    #[serde(default)]
+    pub review_text: String,
+    #[serde(default)]
+    pub review_url: String,
 }
 
 fn default_header_bold() -> bool {
@@ -288,6 +299,325 @@ pub struct UpdateExpenseCategoryRequest {
     pub is_active: bool,
 }
 
+// ===== Promotions =====
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct PromotionSchedule {
+    pub id: i64,
+    pub promo_id: i64,
+    pub day_of_week: i64,
+    pub start_time: String,
+    pub end_time: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromotionScheduleInput {
+    pub day_of_week: i64,
+    pub start_time: String,
+    pub end_time: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct PromotionRow {
+    pub id: i64,
+    pub name: String,
+    pub discount_type: String,
+    pub discount_value: i64,
+    pub max_discount: Option<i64>,
+    pub min_order_amount: i64,
+    pub quota_limit: i64,
+    pub used_count: i64,
+    pub start_at: Option<String>,
+    pub end_at: Option<String>,
+    pub regular_only: i64,
+    pub is_active: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromotionResponse {
+    pub id: i64,
+    pub name: String,
+    pub discount_type: String,
+    pub discount_value: i64,
+    pub max_discount: Option<i64>,
+    pub min_order_amount: i64,
+    pub quota_limit: i64,
+    pub used_count: i64,
+    pub remaining_quota: i64,
+    pub start_at: Option<String>,
+    pub end_at: Option<String>,
+    pub schedules: Vec<PromotionSchedule>,
+    pub regular_only: bool,
+    pub is_active: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl PromotionResponse {
+    pub fn from_parts(row: PromotionRow, schedules: Vec<PromotionSchedule>) -> Self {
+        let remaining_quota = row.quota_limit.saturating_sub(row.used_count);
+        Self {
+            id: row.id,
+            name: row.name,
+            discount_type: row.discount_type,
+            discount_value: row.discount_value,
+            max_discount: row.max_discount,
+            min_order_amount: row.min_order_amount,
+            quota_limit: row.quota_limit,
+            used_count: row.used_count,
+            remaining_quota,
+            start_at: row.start_at,
+            end_at: row.end_at,
+            schedules,
+            regular_only: row.regular_only != 0,
+            is_active: row.is_active != 0,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreatePromotionRequest {
+    pub name: String,
+    pub discount_type: String,
+    pub discount_value: i64,
+    pub max_discount: Option<i64>,
+    pub min_order_amount: Option<i64>,
+    pub quota_limit: i64,
+    pub start_at: Option<String>,
+    pub end_at: Option<String>,
+    pub schedules: Option<Vec<PromotionScheduleInput>>,
+    pub regular_only: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdatePromotionRequest {
+    pub name: String,
+    pub discount_type: String,
+    pub discount_value: i64,
+    pub max_discount: Option<i64>,
+    pub min_order_amount: i64,
+    pub quota_limit: i64,
+    pub start_at: Option<String>,
+    pub end_at: Option<String>,
+    pub schedules: Option<Vec<PromotionScheduleInput>>,
+    pub regular_only: bool,
+    pub is_active: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ApplyOrderPromoRequest {
+    pub promo_id: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct AppliedPromotionDetail {
+    pub id: i64,
+    pub order_id: i64,
+    pub promo_id: i64,
+    pub promo_name_snapshot: String,
+    pub discount_amount: i64,
+    pub applied_by_username: String,
+    pub status: String,
+    pub created_at: String,
+}
+
+// ===== Vouchers =====
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct VoucherCampaignRow {
+    pub id: i64,
+    pub name: String,
+    pub code_mode: String,
+    pub static_code: Option<String>,
+    pub code_template: Option<String>,
+    pub display_format: String,
+    pub receipt_message: String,
+    pub auto_issue_on_pay: i64,
+    pub issue_min_order_amount: i64,
+    pub issue_regular_only: i64,
+    pub issue_quota_limit: i64,
+    pub issued_count: i64,
+    pub seq_counter: i64,
+    pub issue_start_at: Option<String>,
+    pub issue_end_at: Option<String>,
+    pub discount_type: String,
+    pub discount_value: i64,
+    pub max_discount: Option<i64>,
+    pub redeem_min_order_amount: i64,
+    pub redeem_regular_only: i64,
+    pub redeem_quota_limit: i64,
+    pub redeemed_count: i64,
+    pub valid_days: Option<i64>,
+    pub redeem_start_at: Option<String>,
+    pub redeem_end_at: Option<String>,
+    pub is_active: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VoucherCampaignResponse {
+    pub id: i64,
+    pub name: String,
+    pub code_mode: String,
+    pub static_code: Option<String>,
+    pub code_template: Option<String>,
+    pub display_format: String,
+    pub receipt_message: String,
+    pub auto_issue_on_pay: bool,
+    pub issue_min_order_amount: i64,
+    pub issue_regular_only: bool,
+    pub issue_quota_limit: i64,
+    pub issued_count: i64,
+    pub remaining_issue_quota: i64,
+    pub issue_start_at: Option<String>,
+    pub issue_end_at: Option<String>,
+    pub discount_type: String,
+    pub discount_value: i64,
+    pub max_discount: Option<i64>,
+    pub redeem_min_order_amount: i64,
+    pub redeem_regular_only: bool,
+    pub redeem_quota_limit: i64,
+    pub redeemed_count: i64,
+    pub remaining_redeem_quota: i64,
+    pub valid_days: Option<i64>,
+    pub redeem_start_at: Option<String>,
+    pub redeem_end_at: Option<String>,
+    pub is_active: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl From<VoucherCampaignRow> for VoucherCampaignResponse {
+    fn from(r: VoucherCampaignRow) -> Self {
+        Self {
+            id: r.id,
+            name: r.name,
+            code_mode: r.code_mode,
+            static_code: r.static_code,
+            code_template: r.code_template,
+            display_format: r.display_format,
+            receipt_message: r.receipt_message,
+            auto_issue_on_pay: r.auto_issue_on_pay != 0,
+            issue_min_order_amount: r.issue_min_order_amount,
+            issue_regular_only: r.issue_regular_only != 0,
+            issue_quota_limit: r.issue_quota_limit,
+            issued_count: r.issued_count,
+            remaining_issue_quota: r.issue_quota_limit.saturating_sub(r.issued_count),
+            issue_start_at: r.issue_start_at,
+            issue_end_at: r.issue_end_at,
+            discount_type: r.discount_type,
+            discount_value: r.discount_value,
+            max_discount: r.max_discount,
+            redeem_min_order_amount: r.redeem_min_order_amount,
+            redeem_regular_only: r.redeem_regular_only != 0,
+            redeem_quota_limit: r.redeem_quota_limit,
+            redeemed_count: r.redeemed_count,
+            remaining_redeem_quota: r.redeem_quota_limit.saturating_sub(r.redeemed_count),
+            valid_days: r.valid_days,
+            redeem_start_at: r.redeem_start_at,
+            redeem_end_at: r.redeem_end_at,
+            is_active: r.is_active != 0,
+            created_at: r.created_at,
+            updated_at: r.updated_at,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateVoucherCampaignRequest {
+    pub name: String,
+    pub code_mode: String,
+    pub static_code: Option<String>,
+    pub code_template: Option<String>,
+    pub display_format: Option<String>,
+    pub receipt_message: Option<String>,
+    pub auto_issue_on_pay: Option<bool>,
+    pub issue_min_order_amount: Option<i64>,
+    pub issue_regular_only: Option<bool>,
+    pub issue_quota_limit: i64,
+    pub issue_start_at: Option<String>,
+    pub issue_end_at: Option<String>,
+    pub discount_type: String,
+    pub discount_value: i64,
+    pub max_discount: Option<i64>,
+    pub redeem_min_order_amount: Option<i64>,
+    pub redeem_regular_only: Option<bool>,
+    pub redeem_quota_limit: i64,
+    pub valid_days: Option<i64>,
+    pub redeem_start_at: Option<String>,
+    pub redeem_end_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateVoucherCampaignRequest {
+    pub name: String,
+    pub code_mode: String,
+    pub static_code: Option<String>,
+    pub code_template: Option<String>,
+    pub display_format: String,
+    pub receipt_message: String,
+    pub auto_issue_on_pay: bool,
+    pub issue_min_order_amount: i64,
+    pub issue_regular_only: bool,
+    pub issue_quota_limit: i64,
+    pub issue_start_at: Option<String>,
+    pub issue_end_at: Option<String>,
+    pub discount_type: String,
+    pub discount_value: i64,
+    pub max_discount: Option<i64>,
+    pub redeem_min_order_amount: i64,
+    pub redeem_regular_only: bool,
+    pub redeem_quota_limit: i64,
+    pub valid_days: Option<i64>,
+    pub redeem_start_at: Option<String>,
+    pub redeem_end_at: Option<String>,
+    pub is_active: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ApplyOrderVoucherRequest {
+    pub code: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct IssueOrderVoucherRequest {
+    pub campaign_id: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct IssuedVoucherDetail {
+    pub id: i64,
+    pub campaign_id: i64,
+    pub source_order_id: Option<i64>,
+    pub code: String,
+    pub is_unique_code: i64,
+    pub display_format_snapshot: String,
+    pub receipt_message_snapshot: String,
+    pub status: String,
+    pub expires_at: Option<String>,
+    pub issued_by_username: String,
+    pub issued_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct AppliedVoucherDetail {
+    pub id: i64,
+    pub order_id: i64,
+    pub campaign_id: i64,
+    pub issued_voucher_id: Option<i64>,
+    pub code_snapshot: String,
+    pub campaign_name_snapshot: String,
+    pub discount_amount: i64,
+    pub applied_by_username: String,
+    pub status: String,
+    pub created_at: String,
+}
+
 // ===== Orders (Nota Digital) =====
 
 #[derive(Debug, Deserialize)]
@@ -334,6 +664,8 @@ pub struct OrderRow {
     pub created_by_user_id: Option<i64>,
     pub notes: String,
     pub status: String,
+    pub subtotal_amount: i64,
+    pub discount_amount: i64,
     pub total_amount: i64,
     pub created_at: String,
     pub paid_at: Option<String>,
@@ -353,7 +685,12 @@ pub struct OrderDetail {
     pub created_by_user_id: Option<i64>,
     pub notes: String,
     pub status: String,
+    pub subtotal_amount: i64,
+    pub discount_amount: i64,
     pub total_amount: i64,
+    pub applied_promotions: Vec<AppliedPromotionDetail>,
+    pub applied_vouchers: Vec<AppliedVoucherDetail>,
+    pub issued_vouchers: Vec<IssuedVoucherDetail>,
     pub created_at: String,
     pub paid_at: Option<String>,
     pub voided_at: Option<String>,
@@ -362,7 +699,13 @@ pub struct OrderDetail {
 }
 
 impl OrderDetail {
-    pub fn from_parts(order: OrderRow, items: Vec<OrderItemDetail>) -> Self {
+    pub fn from_parts(
+        order: OrderRow,
+        items: Vec<OrderItemDetail>,
+        applied_promotions: Vec<AppliedPromotionDetail>,
+        applied_vouchers: Vec<AppliedVoucherDetail>,
+        issued_vouchers: Vec<IssuedVoucherDetail>,
+    ) -> Self {
         Self {
             id: order.id,
             order_number: order.order_number,
@@ -374,7 +717,12 @@ impl OrderDetail {
             created_by_user_id: order.created_by_user_id,
             notes: order.notes,
             status: order.status,
+            subtotal_amount: order.subtotal_amount,
+            discount_amount: order.discount_amount,
             total_amount: order.total_amount,
+            applied_promotions,
+            applied_vouchers,
+            issued_vouchers,
             created_at: order.created_at,
             paid_at: order.paid_at,
             voided_at: order.voided_at,
@@ -386,6 +734,13 @@ impl OrderDetail {
 
 // ===== Daily Report & Performance Analytics =====
 
+#[derive(Debug, Serialize, Deserialize, FromRow)]
+pub struct PromoUsageSummary {
+    pub promo_name: String,
+    pub order_count: i64,
+    pub total_discount: i64,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RevenueSummary {
     pub paid_total: i64,
@@ -395,6 +750,7 @@ pub struct RevenueSummary {
     pub voided_total: i64,
     pub voided_count: i64,
     pub total_portions_sold: i64,
+    pub total_discounts: i64,
     pub total_expenses: i64,
     pub net_profit: i64,
 }
@@ -443,6 +799,7 @@ pub struct DailyReportResponse {
     pub revenue: RevenueSummary,
     pub sales_by_channel: Vec<ChannelSalesSummary>,
     pub sales_by_menu: Vec<MenuSalesSummary>,
+    pub promo_summary: Vec<PromoUsageSummary>,
     pub expenses: Vec<DailyExpense>,
     pub stock_reconciliation: Vec<StockReconciliationRow>,
 }

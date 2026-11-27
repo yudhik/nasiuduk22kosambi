@@ -1,4 +1,4 @@
-use chrono::{Local, NaiveDate};
+use chrono::{Datelike, Local, NaiveDate};
 use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
     Sqlite, SqlitePool, Transaction,
@@ -23,6 +23,16 @@ pub fn today_date() -> String {
 
 pub fn now_iso() -> String {
     Local::now().to_rfc3339()
+}
+
+/// Returns `(YYYY-MM-DDTHH:MM, day_of_week 0=Mon..6=Sun, HH:MM)` in local store time from a single clock read.
+pub fn now_local_schedule_clock() -> (String, i64, String) {
+    let now = Local::now();
+    (
+        now.format("%Y-%m-%dT%H:%M").to_string(),
+        now.weekday().num_days_from_monday() as i64,
+        now.format("%H:%M").to_string(),
+    )
 }
 
 /// Validates and normalizes an optional `YYYY-MM-DD` business date query/body parameter.

@@ -53,9 +53,10 @@ Aplikasi web POS & kontrol stok harian untuk **Nasi Uduk 22 Kosambi - Mpok Indri
 - **Printer Bluetooth 58mm Tanpa Dialog (Android — Iware X583)**:
   - Formatter ESC/POS 32 karakter/baris dengan koneksi **Web Bluetooth (BLE)** (*pair* 1× di awal shift, cetak berikutnya langsung keluar tanpa dialog browser).
   - Dilengkapi dukungan **RawBT Android (58mm)** dan **Browser Print Preview** (`58mm`, `80mm`, `A4`).
-- **Konfigurasi Header & Footer Nota (Khusus Admin)**:
+- **Konfigurasi Header, Footer & Bagian Ulasan Nota (Khusus Admin):**
   - Admin dapat mengatur teks **Header Nota** (multi-baris, maks. 8 baris / 300 karakter) dan **Footer Nota** (opsional, multi-baris) langsung dari tab **Admin → Header & Footer Nota** tanpa perlu compile ulang aplikasi.
   - Pengaturan gaya baris pertama header: **Cetak Tebal (Bold + Double-Strike)** dan **Ukuran Font ESC/POS** (`Normal 1x1`, `Tinggi 1x2`, `Lebar 2x1`, `Besar 2x2`) lengkap dengan live preview 58mm.
+  - **Bagian Ulasan Pelanggan (`0009_receipt_review_section.sql`):** Toggle QR Review (mis. Google Maps / IG / WhatsApp, maks. 200 karakter URL) di bawah footer struk `PAID`. Saat aktif, pemberian voucher otomatis & manual **otomatis dijeda** agar struk 58mm tidak mencetak 2 QR (penukaran voucher lama tetap berjalan normal).
 
 ### 6. Pengeluaran Toko (Tab Khusus Pemilik & Admin)
 - **Bebas Status Buka/Tutup Toko**: Pemilik dan Admin dapat mencatat, mengedit, dan menghapus pengeluaran kapan saja (`BELUM BUKA`, `BUKA`, maupun `TUTUP`) dengan pemilihan **tanggal bebas (`business_date`)**.
@@ -63,7 +64,16 @@ Aplikasi web POS & kontrol stok harian untuk **Nasi Uduk 22 Kosambi - Mpok Indri
 - **Kategori Pengeluaran Dinamis (`expense_categories`)**: Kategori dapat ditambah, diubah nama (otomatis memperbarui label pada catatan pengeluaran), dan dinonaktifkan tanpa menghapus histori.
 - **Grafik Perbandingan Persentase Kategori**: Visualisasi *stacked bar* dan rincian persentase per kategori pengeluaran beserta input nominal berpemisah ribuan.
 
-### 7. Laporan Harian & Analitik Performa
+### 7. Promo Diskon Berbasis Kuota & Jadwal (Tab Khusus Pemilik & Admin)
+- **Konfigurasi Promo (Tab `Promo` untuk Pemilik & Admin):**
+  - Mendukung potongan **Nominal (`FIXED` Rp)** maupun **Persentase (`PERCENT` % + batas maksimal Rp)**, minimal belanja, rentang tanggal & jam (`start_at`–`end_at`), jadwal berulang per hari/jam (`promotion_schedules` untuk *Happy Hour*, *Sarapan Pagi*, *Jumat Berkah*), dan pembatasan saluran (`Khusus Regular` atau semua channel).
+  - **Kuota Pelanggan Terbatas (`quota_limit > 0`, wajib diisi):** Setiap promo wajib memiliki batas kuota anggaran (mis. *"Promo 50 Pelanggan Pertama"*) yang dijaga secara atomik $O(1)$ (`used_count < quota_limit`) melalui tabel terpisah `applied_promotions` (kuota otomatis kembali jika promo dihapus atau nota dibatalkan/`VOIDED`, dengan histori tetap tersimpan sebagai `VOIDED`).
+- **Penerapan Kasir & Laporan:** Kasir menerapkan/menghapus promo pada nota `UNPAID` tepat sebelum menekan **Tandai Lunas**; rekap total diskon & pemakaian promo tampil di **Laporan Harian**.
+- **Voucher Kunjungan Berikutnya (Tab `Promo → Voucher`, `0008_vouchers.sql`):**
+  - **Pemberian saat Bayar (`PAID`):** Voucher diterbitkan (otomatis saat `Tandai Lunas` atau manual) berdasarkan syarat minimal subtotal & kuota pemberian tanpa memotong nota hari ini, lalu tercetak di bawah footer struk 58mm dalam format **Teks Biasa**, **QR Code** (`GS ( k`), atau **Barcode CODE128** (`GS k`), mendukung kode **Static** maupun **Dynamic** (`{RAND6}`, `{DATE}`, `{SEQ4}`).
+  - **Penukaran & Pemindai Kamera:** Pada kunjungan berikutnya, Kasir memindai QR/Barcode voucher via kamera HP Android (`BarcodeDetector` + fallback foto/ketik manual) pada nota `UNPAID`; potongan otomatis diterapkan dan dapat digabung (*stack*) dengan Promo Diskon. Pembatalan nota (`VOIDED`) otomatis memulihkan voucher yang ditukar.
+
+### 8. Laporan Harian & Analitik Performa
 - **Laporan Harian**: Navigasi stepper tanggal (`<` / `>` / Hari Ini), rekap omzet lunas, belum bayar, void, pengeluaran, **Laba Bersih**, rekonsiliasi stok (awal/restock/terjual/selisih opname fisik), drill-down riwayat mutasi stok, serta **Export CSV**.
 - **Analitik Performa**: Filter rentang waktu (`Hari Ini`, `7 Hari`, `30 Hari`, `Bulan Ini`, `Custom`), proporsi saluran penjualan, grafik tren ganda (Pendapatan vs Pengeluaran), menu terlaris & terendah, variansi stok, jam sibuk, hari tersibuk, serta **interval pembuatan nota per user**.
 
@@ -74,7 +84,7 @@ Aplikasi web POS & kontrol stok harian untuk **Nasi Uduk 22 Kosambi - Mpok Indri
 ```text
 application/
 ├── backend/
-│   ├── migrations/              # Embedded SQLite migrations (0001..0006, LF-only)
+│   ├── migrations/              # Embedded SQLite migrations (0001..0009, LF-only)
 │   ├── src/
 │   │   ├── auth.rs              # Argon2id, session cookies, lockout, CLI unlock
 │   │   ├── db.rs                # SQLite WAL pool, schema & optional sample seeding

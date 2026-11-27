@@ -518,7 +518,12 @@ export function DailyReportPage({ storeStatus, onToast }: DailyReportPageProps) 
                 >
                   {formatRupiah(report.revenue.net_profit)}
                 </p>
-                <p className="mt-0.5 text-[11px] text-brand-brown/65">Lunas − Pengeluaran</p>
+                <p className="mt-0.5 text-[11px] text-brand-brown/65">
+                  Lunas − Pengeluaran
+                  {report.revenue.total_discounts > 0
+                    ? ` • Diskon ${formatRupiah(report.revenue.total_discounts)}`
+                    : ''}
+                </p>
               </button>
 
               <button
@@ -573,6 +578,36 @@ export function DailyReportPage({ storeStatus, onToast }: DailyReportPageProps) 
                 </p>
               </button>
             </div>
+
+            {/* Promo Usage Summary (shown when discounts were applied today) */}
+            {report.promo_summary.length > 0 && (
+              <div className="rounded-2xl border border-emerald-200 bg-white p-4 shadow-sm">
+                <div className="flex items-center justify-between gap-2">
+                  <h3 className="text-sm font-extrabold text-brand-brown">
+                    Rekap Promo &amp; Diskon ({report.business_date})
+                  </h3>
+                  <span className="rounded-full bg-emerald-100 px-2.5 py-0.5 text-xs font-extrabold text-emerald-800">
+                    Total -{formatRupiah(report.revenue.total_discounts)}
+                  </span>
+                </div>
+                <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                  {report.promo_summary.map((pm) => (
+                    <div
+                      key={pm.promo_name}
+                      className="flex items-center justify-between rounded-xl border border-emerald-200/70 bg-emerald-50/40 px-3 py-2 text-xs"
+                    >
+                      <div>
+                        <p className="font-bold text-brand-brown">{pm.promo_name}</p>
+                        <p className="text-[11px] text-brand-brown/65">{pm.order_count} nota lunas</p>
+                      </div>
+                      <span className="font-extrabold text-emerald-700">
+                        -{formatRupiah(pm.total_discount)}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {/* Sales Grouped by Channel */}
             <div className="rounded-2xl border border-brand-amber-soft bg-white p-4 shadow-sm">
