@@ -4,6 +4,7 @@ import {
   Bluetooth,
   BluetoothConnected,
   BluetoothOff,
+  Camera,
   CheckCircle2,
   Clock,
   Lock,
@@ -12,11 +13,13 @@ import {
   RefreshCw,
   Store,
   Tag,
+  Ticket,
   X,
   XCircle,
 } from 'lucide-react';
 import { api } from '../api/client';
 import { BottomSheet } from '../components/BottomSheet';
+import { VoucherScannerModal } from '../components/VoucherScannerModal';
 import type { ToastMessage } from '../components/ToastContainer';
 import type {
   AuthUser,
@@ -84,6 +87,11 @@ export function CashierOrdersPage({
   const [activePromos, setActivePromos] = useState<Promotion[]>([]);
   const [promoTarget, setPromoTarget] = useState<OrderDetail | null>(null);
 
+  // Voucher redeem + camera scanner modal
+  const [voucherTarget, setVoucherTarget] = useState<OrderDetail | null>(null);
+  const [voucherCodeInput, setVoucherCodeInput] = useState('');
+  const [scannerOpen, setScannerOpen] = useState(false);
+
   // Thermal Bluetooth printer state
   const [printerMode, setPrinterMode] = useState<PrinterMode>(getSavedPrinterMode);
   const [btState, setBtState] = useState<BluetoothPrinterState>(getBluetoothPrinterState);
@@ -119,6 +127,48 @@ export function CashierOrdersPage({
   useEffect(() => {
     void loadOrders();
   }, [loadOrders, refreshSignal]);
+
+  const handleApplyVoucher = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!voucherTarget) return;
+    const code = voucherCodeInput.trim().toUpperCase();
+    if (!code) {
+      setError('Masukkan atau scan kode voucher terlebih dahulu.');
+      return;
+    }
+    try {
+      setBusyId(voucherTarget.id);
+      setError(null);
+      const updated = await api.applyOrderVoucher(voucherTarget.id, code);
+      setOrders((prev) => prev.map((o) => (o.id === updated.id ? updated : o)));
+      setVoucherTarget(null);
+      setVoucherCodeInput('');
+      onToast(
+        `Voucher ${code} diterapkan`,
+        `Total bayar menjadi ${formatRupiah(updated.total_amount)}`
+      );
+      onOrdersChanged();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Gagal menukar voucher');
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const handleRemoveVoucher = async (order: OrderDetail) => {
+    try {
+      setBusyId(order.id);
+      setError(null);
+      const updated = await api.removeOrderVoucher(order.id);
+      setOrders((prev) => prev.map((o) => (o.id === updated.id ? updated : o)));
+      onToast(`Voucher dihapus dari ${order.order_number}`, undefined, 'info');
+      onOrdersChanged();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Gagal menghapus voucher');
+    } finally {
+      setBusyId(null);
+    }
+  };
 
   const counts = useMemo(() => {
     let unpaid = 0;
@@ -602,6 +652,44 @@ export function CashierOrdersPage({
                     </div>
                   )}
 
+                  {(order.applied_vouchers ?? []).length > 0 && (
+                    <div className="mt-2 flex items-center justify-between gap-2 rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-[11px] text-amber-900">
+                      <div className="min-w-0">
+                        <span className="font-bold">
+                          Voucher:{' '}
+                          {order.applied_vouchers
+                            .map((av) => `${av.code_snapshot} (-${formatRupiah(av.discount_amount)})`)
+                            .join(', ')}
+                        </span>
+                        <span className="block text-[10px] text-amber-800/80">
+                          Subtotal {formatRupiah(order.subtotal_amount)} → Bayar{' '}
+                          {formatRupiah(order.total_amount)}
+                        </span>
+                      </div>
+                      {order.status === 'UNPAID' && !isTodayClosed && (
+                        <button
+                          type="button"
+                          disabled={busyId === order.id}
+                          onClick={() => void handleRemoveVoucher(order)}
+                          className="inline-flex h-7 items-center gap-1 rounded-lg border border-amber-300 bg-white px-2 text-[10px] font-bold text-rose-700 hover:bg-rose-50"
+                          title="Hapus voucher"
+                        >
+                          <X className="h-3 w-3" />
+                          <span>Hapus</span>
+                        </button>
+                      )}
+                    </div>
+                  )}
+
+                  {(order.issued_vouchers ?? []).length > 0 && (
+                    <div className="mt-2 rounded-lg border border-sky-200 bg-sky-50 px-2.5 py-1.5 text-[11px] text-sky-900">
+                      <span className="font-bold">Voucher Diberikan di Struk: </span>
+                      <span className="font-mono font-extrabold">
+                        {order.issued_vouchers.map((iv) => iv.code).join(', ')}
+                      </span>
+                    </div>
+                  )}
+
                   {order.void_reason && (
                     <p className="mt-2 rounded-lg bg-rose-50 px-2.5 py-1.5 text-[11px] text-rose-700">
                       <strong>Alasan Batal:</strong> {order.void_reason}
@@ -620,6 +708,22 @@ export function CashierOrdersPage({
                     >
                       <Percent className="h-3.5 w-3.5 text-brand-orange" />
                       <span>{order.applied_promotions.length > 0 ? 'Ganti Promo' : 'Promo'}</span>
+                    </button>
+                  )}
+                  {order.status === 'UNPAID' && !isTodayClosed && (
+                    <button
+                      type="button"
+                      disabled={busyId === order.id}
+                      onClick={() => {
+                        setVoucherTarget(order);
+                        setVoucherCodeInput('');
+                      }}
+                      className="inline-flex h-10 items-center justify-center gap-1.5 rounded-xl border border-amber-300 bg-amber-50 px-3 text-xs font-bold text-amber-900 hover:bg-amber-100 disabled:opacity-60"
+                    >
+                      <Ticket className="h-3.5 w-3.5 text-brand-orange" />
+                      <span>
+                        {(order.applied_vouchers ?? []).length > 0 ? 'Ganti Voucher' : 'Voucher'}
+                      </span>
                     </button>
                   )}
                   {order.status === 'UNPAID' && !isTodayClosed && (
@@ -800,6 +904,75 @@ export function CashierOrdersPage({
           )}
         </p>
       </BottomSheet>
+
+      {/* Voucher Redeem BottomSheet */}
+      <BottomSheet
+        open={Boolean(voucherTarget)}
+        title="Tukar Voucher Pelanggan"
+        subtitle={
+          voucherTarget
+            ? `${voucherTarget.order_number} • Subtotal ${formatRupiah(voucherTarget.subtotal_amount)}`
+            : ''
+        }
+        onClose={() => setVoucherTarget(null)}
+        footer={
+          <div className="grid grid-cols-2 gap-2.5">
+            <button
+              type="button"
+              onClick={() => setVoucherTarget(null)}
+              className="h-11 rounded-xl border border-brand-amber-soft bg-white text-sm font-semibold text-brand-brown"
+            >
+              Batal
+            </button>
+            <button
+              type="button"
+              disabled={busyId !== null || !voucherCodeInput.trim()}
+              onClick={() => void handleApplyVoucher()}
+              className="h-11 rounded-xl bg-brand-orange text-sm font-bold text-white hover:bg-brand-orange-dark disabled:opacity-60"
+            >
+              {busyId !== null ? 'Memproses...' : 'Terapkan Voucher'}
+            </button>
+          </div>
+        }
+      >
+        <form onSubmit={handleApplyVoucher} className="space-y-3">
+          <div>
+            <label className="mb-1 block text-xs font-semibold text-brand-brown/80">
+              Kode Voucher (Scan QR/Barcode atau Ketik Manual)
+            </label>
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={voucherCodeInput}
+                onChange={(e) => setVoucherCodeInput(e.target.value.toUpperCase())}
+                placeholder="cth: NU22-K7M9P2"
+                className="h-11 flex-1 rounded-xl border border-brand-amber-soft px-3.5 font-mono text-sm font-bold uppercase text-brand-brown focus:border-brand-orange focus:outline-none"
+                autoFocus
+              />
+              <button
+                type="button"
+                onClick={() => setScannerOpen(true)}
+                className="inline-flex h-11 shrink-0 items-center gap-1.5 rounded-xl border border-brand-amber bg-brand-cream px-3.5 text-xs font-bold text-brand-brown hover:bg-brand-cream-deep"
+              >
+                <Camera className="h-4 w-4 text-brand-orange" />
+                <span>Scan</span>
+              </button>
+            </div>
+          </div>
+          <p className="text-[11px] text-brand-brown/65">
+            Voucher dapat digabung (stack) dengan Promo Diskon pada nota yang sama.
+          </p>
+        </form>
+      </BottomSheet>
+
+      <VoucherScannerModal
+        open={scannerOpen}
+        onClose={() => setScannerOpen(false)}
+        onDetected={(code) => {
+          setVoucherCodeInput(code);
+          onToast(`Kode terdeteksi: ${code}`, 'Tekan "Terapkan Voucher" untuk memakai', 'info');
+        }}
+      />
 
       {/* Void Confirmation BottomSheet */}
       <BottomSheet

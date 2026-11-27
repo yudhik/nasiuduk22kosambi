@@ -519,6 +519,28 @@ struct BackupAppliedPromotionRow {
 }
 
 #[derive(FromRow)]
+struct BackupAppliedVoucherRow {
+    id: i64,
+    order_id: i64,
+    campaign_id: i64,
+    issued_voucher_id: Option<i64>,
+    code_snapshot: String,
+    campaign_name_snapshot: String,
+    discount_amount: i64,
+    applied_by_username: String,
+    status: String,
+    created_at: String,
+}
+
+#[derive(FromRow)]
+struct BackupIssuedVoucherRow {
+    id: i64,
+    campaign_id: i64,
+    source_order_id: Option<i64>,
+    status: String,
+}
+
+#[derive(FromRow)]
 struct BackupOrderItemRow {
     id: i64,
     order_id: i64,
@@ -752,6 +774,34 @@ pub async fn reset_store_day(
     .fetch_all(&mut *tx)
     .await?;
 
+    let backup_applied_vouchers: Vec<BackupAppliedVoucherRow> = sqlx::query_as(
+        r#"
+        SELECT av.id, av.order_id, av.campaign_id, av.issued_voucher_id, av.code_snapshot,
+               av.campaign_name_snapshot, av.discount_amount, av.applied_by_username,
+               av.status, av.created_at
+        FROM applied_vouchers av
+        INNER JOIN orders o ON o.id = av.order_id
+        WHERE o.business_date = ?
+        ORDER BY av.id ASC
+        "#,
+    )
+    .bind(&today)
+    .fetch_all(&mut *tx)
+    .await?;
+
+    let backup_issued_vouchers: Vec<BackupIssuedVoucherRow> = sqlx::query_as(
+        r#"
+        SELECT iv.id, iv.campaign_id, iv.source_order_id, iv.status
+        FROM issued_vouchers iv
+        INNER JOIN orders o ON o.id = iv.source_order_id
+        WHERE o.business_date = ?
+        ORDER BY iv.id ASC
+        "#,
+    )
+    .bind(&today)
+    .fetch_all(&mut *tx)
+    .await?;
+
     let order_items: Vec<BackupOrderItemRow> = sqlx::query_as(
         r#"
         SELECT oi.id, oi.order_id, oi.menu_item_id, oi.menu_name_snapshot,
@@ -942,6 +992,53 @@ pub async fn reset_store_day(
         }
     }
 
+    for iv in &backup_issued_vouchers {
+        if iv.status == "ACTIVE" {
+            let _ = writeln!(
+                sql,
+                "UPDATE issued_vouchers SET status = 'ACTIVE', source_order_id = {} WHERE id = {};",
+                sql_opt_i64(iv.source_order_id),
+                iv.id
+            );
+            let _ = writeln!(
+                sql,
+                "UPDATE voucher_campaigns SET issued_count = MIN(issue_quota_limit, issued_count + 1) WHERE id = {};",
+                iv.campaign_id
+            );
+        }
+    }
+
+    for av in &backup_applied_vouchers {
+        let _ = writeln!(
+            sql,
+            "INSERT INTO applied_vouchers (id, order_id, campaign_id, issued_voucher_id, code_snapshot, campaign_name_snapshot, discount_amount, applied_by_username, status, created_at) VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {});",
+            av.id,
+            av.order_id,
+            av.campaign_id,
+            sql_opt_i64(av.issued_voucher_id),
+            sql_text(&av.code_snapshot),
+            sql_text(&av.campaign_name_snapshot),
+            av.discount_amount,
+            sql_text(&av.applied_by_username),
+            sql_text(&av.status),
+            sql_text(&av.created_at),
+        );
+        if av.status == "APPLIED" {
+            let _ = writeln!(
+                sql,
+                "UPDATE voucher_campaigns SET redeemed_count = MIN(redeem_quota_limit, redeemed_count + 1) WHERE id = {};",
+                av.campaign_id
+            );
+            if let Some(iv_id) = av.issued_voucher_id {
+                let _ = writeln!(
+                    sql,
+                    "UPDATE issued_vouchers SET status = 'REDEEMED' WHERE id = {};",
+                    iv_id
+                );
+            }
+        }
+    }
+
     for oi in &order_items {
         let _ = writeln!(
             sql,
@@ -1114,6 +1211,60 @@ pub async fn reset_store_day(
     .bind(&today)
     .execute(&mut *tx)
     .await?;
+
+    // Release redeemed vouchers and void unredeemed vouchers issued by today's orders before deleting orders
+    let today_applied_vouchers: Vec<(i64, Option<i64>)> = sqlx::query_as(
+        "SELECT av.campaign_id, av.issued_voucher_id FROM applied_vouchers av INNER JOIN orders o ON o.id = av.order_id WHERE o.business_date = ? AND av.status = 'APPLIED'",
+    )
+    .bind(&today)
+    .fetch_all(&mut *tx)
+    .await?;
+    for (cid, iv_id) in today_applied_vouchers {
+        sqlx::query(
+            "UPDATE voucher_campaigns SET redeemed_count = MAX(0, redeemed_count - 1), updated_at = ? WHERE id = ?",
+        )
+        .bind(&now_iso)
+        .bind(cid)
+        .execute(&mut *tx)
+        .await?;
+        if let Some(iv) = iv_id {
+            sqlx::query(
+                "UPDATE issued_vouchers SET status = 'ACTIVE' WHERE id = ? AND status = 'REDEEMED'",
+            )
+            .bind(iv)
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
+    sqlx::query(
+        "DELETE FROM applied_vouchers WHERE order_id IN (SELECT id FROM orders WHERE business_date = ?)",
+    )
+    .bind(&today)
+    .execute(&mut *tx)
+    .await?;
+
+    let today_issued_vouchers: Vec<(i64,)> = sqlx::query_as(
+        "SELECT iv.campaign_id FROM issued_vouchers iv INNER JOIN orders o ON o.id = iv.source_order_id WHERE o.business_date = ? AND iv.status = 'ACTIVE'",
+    )
+    .bind(&today)
+    .fetch_all(&mut *tx)
+    .await?;
+    for (cid,) in today_issued_vouchers {
+        sqlx::query(
+            "UPDATE voucher_campaigns SET issued_count = MAX(0, issued_count - 1), updated_at = ? WHERE id = ?",
+        )
+        .bind(&now_iso)
+        .bind(cid)
+        .execute(&mut *tx)
+        .await?;
+    }
+    sqlx::query(
+        "UPDATE issued_vouchers SET status = 'VOIDED', source_order_id = NULL WHERE source_order_id IN (SELECT id FROM orders WHERE business_date = ?) AND status = 'ACTIVE'",
+    )
+    .bind(&today)
+    .execute(&mut *tx)
+    .await?;
+
     sqlx::query("DELETE FROM orders WHERE business_date = ?")
         .bind(&today)
         .execute(&mut *tx)

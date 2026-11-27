@@ -211,6 +211,93 @@ export interface AppliedPromotionDetail {
   created_at: string;
 }
 
+export type VoucherCodeMode = 'STATIC' | 'DYNAMIC';
+export type VoucherDisplayFormat = 'TEXT' | 'QR' | 'BARCODE';
+
+export interface VoucherCampaign {
+  id: number;
+  name: string;
+  code_mode: VoucherCodeMode;
+  static_code: string | null;
+  code_template: string | null;
+  display_format: VoucherDisplayFormat;
+  receipt_message: string;
+  auto_issue_on_pay: boolean;
+  issue_min_order_amount: number;
+  issue_regular_only: boolean;
+  issue_quota_limit: number;
+  issued_count: number;
+  remaining_issue_quota: number;
+  issue_start_at: string | null;
+  issue_end_at: string | null;
+  discount_type: PromoDiscountType;
+  discount_value: number;
+  max_discount: number | null;
+  redeem_min_order_amount: number;
+  redeem_regular_only: boolean;
+  redeem_quota_limit: number;
+  redeemed_count: number;
+  remaining_redeem_quota: number;
+  valid_days: number | null;
+  redeem_start_at: string | null;
+  redeem_end_at: string | null;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface UpsertVoucherCampaignPayload {
+  name: string;
+  code_mode: VoucherCodeMode;
+  static_code?: string | null;
+  code_template?: string | null;
+  display_format: VoucherDisplayFormat;
+  receipt_message: string;
+  auto_issue_on_pay: boolean;
+  issue_min_order_amount: number;
+  issue_regular_only: boolean;
+  issue_quota_limit: number;
+  issue_start_at?: string | null;
+  issue_end_at?: string | null;
+  discount_type: PromoDiscountType;
+  discount_value: number;
+  max_discount?: number | null;
+  redeem_min_order_amount: number;
+  redeem_regular_only: boolean;
+  redeem_quota_limit: number;
+  valid_days?: number | null;
+  redeem_start_at?: string | null;
+  redeem_end_at?: string | null;
+  is_active?: boolean;
+}
+
+export interface IssuedVoucherDetail {
+  id: number;
+  campaign_id: number;
+  source_order_id: number | null;
+  code: string;
+  is_unique_code: number;
+  display_format_snapshot: VoucherDisplayFormat;
+  receipt_message_snapshot: string;
+  status: string;
+  expires_at: string | null;
+  issued_by_username: string;
+  issued_at: string;
+}
+
+export interface AppliedVoucherDetail {
+  id: number;
+  order_id: number;
+  campaign_id: number;
+  issued_voucher_id: number | null;
+  code_snapshot: string;
+  campaign_name_snapshot: string;
+  discount_amount: number;
+  applied_by_username: string;
+  status: string;
+  created_at: string;
+}
+
 export interface OrderDetail {
   id: number;
   order_number: string;
@@ -226,6 +313,8 @@ export interface OrderDetail {
   discount_amount: number;
   total_amount: number;
   applied_promotions: AppliedPromotionDetail[];
+  applied_vouchers: AppliedVoucherDetail[];
+  issued_vouchers: IssuedVoucherDetail[];
   created_at: string;
   paid_at: string | null;
   voided_at: string | null;

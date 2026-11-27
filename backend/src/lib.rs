@@ -210,7 +210,7 @@ pub fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
             "/expense-categories/:id",
             put(handlers::expenses::update_expense_category),
         )
-        // Promotions (Quota-based discounts + receipt promo section)
+        // Promotions (Quota-based discounts + recurring schedules)
         .route(
             "/promotions",
             get(handlers::promotions::list_promotions)
@@ -220,6 +220,17 @@ pub fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
             "/promotions/:id",
             put(handlers::promotions::update_promotion)
                 .delete(handlers::promotions::delete_promotion),
+        )
+        // Vouchers (Issued on paid receipts, redeemed on future orders)
+        .route(
+            "/vouchers",
+            get(handlers::vouchers::list_voucher_campaigns)
+                .post(handlers::vouchers::create_voucher_campaign),
+        )
+        .route(
+            "/vouchers/:id",
+            put(handlers::vouchers::update_voucher_campaign)
+                .delete(handlers::vouchers::delete_voucher_campaign),
         )
         // Orders (Nota Digital)
         .route(
@@ -231,6 +242,15 @@ pub fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
             "/orders/:id/promo",
             post(handlers::orders::apply_order_promo)
                 .delete(handlers::orders::remove_order_promo),
+        )
+        .route(
+            "/orders/:id/voucher",
+            post(handlers::vouchers::apply_order_voucher)
+                .delete(handlers::vouchers::remove_order_voucher),
+        )
+        .route(
+            "/orders/:id/vouchers/issue",
+            post(handlers::vouchers::issue_order_voucher),
         )
         .route("/orders/:id/pay", post(handlers::orders::pay_order))
         .route("/orders/:id/void", post(handlers::orders::void_order))

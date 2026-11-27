@@ -8,3 +8,4 @@ pub mod promotions;
 pub mod reports;
 pub mod stocks;
 pub mod store;
+pub mod vouchers;

@@ -2267,3 +2267,288 @@ async fn test_quota_promotions_and_receipt_promo_section() {
         .unwrap();
     assert_eq!(cnt, 4);
 }
+
+#[tokio::test]
+async fn test_vouchers_issue_redeem_stack_and_void() {
+    let (app, pool, admin_cookie) = setup_app().await;
+
+    // 1. Create cashier
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/admin/users",
+        Some(&admin_cookie),
+        Some(json!({
+            "username": "kasir_vch",
+            "full_name": "Kasir Voucher",
+            "role": "cashier",
+            "password": "password1234"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (_, _, cashier_cookie) = login_request(&app, "kasir_vch", "password1234").await;
+    let cashier_cookie = cashier_cookie.unwrap();
+
+    // 2. Cashier cannot create voucher campaigns (403)
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/vouchers",
+        Some(&cashier_cookie),
+        Some(json!({
+            "name": "Forbidden",
+            "code_mode": "STATIC",
+            "static_code": "NOPE",
+            "issue_quota_limit": 5,
+            "discount_type": "FIXED",
+            "discount_value": 5000,
+            "redeem_quota_limit": 5
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // 3. Create DYNAMIC auto-issue voucher (QR, min subtotal 30k to issue, Rp5.000 off next order >= 20k)
+    let (status, dyn_val, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/vouchers",
+        Some(&admin_cookie),
+        Some(json!({
+            "name": "Voucher Kunjungan Berikutnya",
+            "code_mode": "DYNAMIC",
+            "code_template": "NU22-{SEQ4}-{RAND6}",
+            "display_format": "QR",
+            "receipt_message": "Scan QR ini pada kunjungan berikutnya!",
+            "auto_issue_on_pay": true,
+            "issue_min_order_amount": 30000,
+            "issue_regular_only": true,
+            "issue_quota_limit": 10,
+            "discount_type": "FIXED",
+            "discount_value": 5000,
+            "redeem_min_order_amount": 20000,
+            "redeem_regular_only": true,
+            "redeem_quota_limit": 10,
+            "valid_days": 14
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let dyn_camp: nota_digital_backend::models::VoucherCampaignResponse =
+        serde_json::from_value(dyn_val).unwrap();
+    assert_eq!(dyn_camp.code_mode, "DYNAMIC");
+
+    // 4. Create STATIC voucher (BARCODE, manual issue, 10% off up to 5k, redeem_quota = 1)
+    let (status, stat_val, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/vouchers",
+        Some(&admin_cookie),
+        Some(json!({
+            "name": "Voucher Member",
+            "code_mode": "STATIC",
+            "static_code": "NU22-MEMBER",
+            "display_format": "BARCODE",
+            "receipt_message": "Tunjukkan kode ini di kasir",
+            "auto_issue_on_pay": false,
+            "issue_min_order_amount": 0,
+            "issue_quota_limit": 5,
+            "discount_type": "PERCENT",
+            "discount_value": 10,
+            "max_discount": 5000,
+            "redeem_min_order_amount": 0,
+            "redeem_quota_limit": 1
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let stat_camp: nota_digital_backend::models::VoucherCampaignResponse =
+        serde_json::from_value(stat_val).unwrap();
+    assert_eq!(stat_camp.static_code.as_deref(), Some("NU22-MEMBER"));
+
+    // 5. Create instant Promo (Rp3.000 off) to verify stacking with Voucher
+    let (status, p_val, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/promotions",
+        Some(&admin_cookie),
+        Some(json!({
+            "name": "Promo Stack 3rb",
+            "discount_type": "FIXED",
+            "discount_value": 3000,
+            "quota_limit": 10,
+            "regular_only": true
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let promo: PromotionResponse = serde_json::from_value(p_val).unwrap();
+
+    // 6. Open store & create menu (Rp18.000)
+    let stk = create_stock(&app, &admin_cookie, "Nasi Uduk Vch", "porsi").await;
+    let (status, m_val, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/menus",
+        Some(&admin_cookie),
+        Some(json!({
+            "name": "Nasi Uduk Voucher",
+            "category": "Makanan",
+            "price": 18000,
+            "stock_requirements": [{ "stock_item_id": stk.id, "qty_per_unit": 1 }]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let menu: MenuItem = serde_json::from_value(m_val).unwrap();
+
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        "/api/store/open",
+        Some(&admin_cookie),
+        Some(json!({ "stocks": [{ "stock_item_id": stk.id, "initial_stock": 20 }] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (_, ch_val, _) =
+        send_json_with_cookie(&app, Method::GET, "/api/channels", Some(&cashier_cookie), None)
+            .await;
+    let channels: Vec<SalesChannel> = serde_json::from_value(ch_val).unwrap();
+    let regular_id = channels.iter().find(|c| c.code == "regular").unwrap().id;
+
+    let make_order = |qty: i64| {
+        let app = app.clone();
+        let cookie = cashier_cookie.clone();
+        async move {
+            let (st, val, _) = send_json_with_cookie(
+                &app,
+                Method::POST,
+                "/api/orders",
+                Some(&cookie),
+                Some(json!({
+                    "channel_id": regular_id,
+                    "items": [{ "menu_item_id": menu.id, "quantity": qty }]
+                })),
+            )
+            .await;
+            assert_eq!(st, StatusCode::CREATED);
+            serde_json::from_value::<OrderDetail>(val).unwrap()
+        }
+    };
+
+    // Order 1: subtotal 36.000 -> pay -> auto-issues 1 DYNAMIC voucher WITHOUT deducting Order 1
+    let order1 = make_order(2).await;
+    let (status, paid1_val, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        &format!("/api/orders/{}/pay", order1.id),
+        Some(&cashier_cookie),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let paid1: OrderDetail = serde_json::from_value(paid1_val).unwrap();
+    assert_eq!(paid1.total_amount, 36000);
+    assert_eq!(paid1.discount_amount, 0);
+    assert_eq!(paid1.issued_vouchers.len(), 1);
+    let issued_code = paid1.issued_vouchers[0].code.clone();
+    assert!(issued_code.starts_with("NU22-0001-"));
+
+    // Order 2: subtotal 36.000 -> stack Promo (3.000) + Dynamic Voucher (5.000) = 8.000 discount -> total 28.000
+    let order2 = make_order(2).await;
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        &format!("/api/orders/{}/promo", order2.id),
+        Some(&cashier_cookie),
+        Some(json!({ "promo_id": promo.id })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, stacked_val, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        &format!("/api/orders/{}/voucher", order2.id),
+        Some(&cashier_cookie),
+        Some(json!({ "code": issued_code })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let stacked: OrderDetail = serde_json::from_value(stacked_val).unwrap();
+    assert_eq!(stacked.subtotal_amount, 36000);
+    assert_eq!(stacked.discount_amount, 8000);
+    assert_eq!(stacked.total_amount, 28000);
+    assert_eq!(stacked.applied_promotions.len(), 1);
+    assert_eq!(stacked.applied_vouchers.len(), 1);
+
+    // Double-spend on Order 3 with the same DYNAMIC code must fail (409 Conflict)
+    let order3 = make_order(2).await;
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        &format!("/api/orders/{}/voucher", order3.id),
+        Some(&cashier_cookie),
+        Some(json!({ "code": issued_code })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    // Voiding Order 2 restores the dynamic voucher back to ACTIVE so Order 3 can redeem it
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        &format!("/api/orders/{}/void", order2.id),
+        Some(&cashier_cookie),
+        Some(json!({ "reason": "Batal tes voucher" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, order3_vch_val, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        &format!("/api/orders/{}/voucher", order3.id),
+        Some(&cashier_cookie),
+        Some(json!({ "code": issued_code })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let order3_vch: OrderDetail = serde_json::from_value(order3_vch_val).unwrap();
+    assert_eq!(order3_vch.discount_amount, 5000);
+    assert_eq!(order3_vch.total_amount, 31000);
+
+    // STATIC code works on Order 4 up to redeem_quota_limit=1, then fails (409) on Order 5
+    let order4 = make_order(2).await;
+    let (status, o4_val, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        &format!("/api/orders/{}/voucher", order4.id),
+        Some(&cashier_cookie),
+        Some(json!({ "code": "nu22-member" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let o4: OrderDetail = serde_json::from_value(o4_val).unwrap();
+    assert_eq!(o4.discount_amount, 3600); // 10% of 36.000
+
+    let order5 = make_order(2).await;
+    let (status, _, _) = send_json_with_cookie(
+        &app,
+        Method::POST,
+        &format!("/api/orders/{}/voucher", order5.id),
+        Some(&cashier_cookie),
+        Some(json!({ "code": "NU22-MEMBER" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    let (cnt,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM voucher_campaigns")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(cnt, 2);
+}

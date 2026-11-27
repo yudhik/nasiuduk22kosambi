@@ -316,11 +316,13 @@ export function buildEscPosReceipt58mm(
   pushLine(divider);
   if (order.discount_amount > 0) {
     pushLine(padLeftRight('Subtotal', formatRpPlain(order.subtotal_amount), WIDTH));
-    const promoNames = order.applied_promotions
-      .map((ap) => ap.promo_name_snapshot)
+    const discountNames = [
+      ...order.applied_promotions.map((ap) => ap.promo_name_snapshot),
+      ...order.applied_vouchers.map((av) => `Voucher ${av.code_snapshot}`),
+    ]
       .filter(Boolean)
       .join(', ');
-    const discLabel = promoNames ? `Diskon (${promoNames})` : 'Diskon';
+    const discLabel = discountNames ? `Diskon (${discountNames})` : 'Diskon';
     for (const l of wrapText(discLabel, WIDTH)) {
       pushLine(l);
     }
@@ -359,10 +361,86 @@ export function buildEscPosReceipt58mm(
     }
   }
 
+  // Issued Vouchers Section: printed below footer when voucher(s) were issued on this PAID receipt
+  for (const iv of order.issued_vouchers ?? []) {
+    const code = iv.code?.trim() ?? '';
+    if (!code) continue;
+    const msg = iv.receipt_message_snapshot?.trim() ?? '';
+    pushLine(divider);
+    pushBytes(0x1b, 0x61, 0x01); // Center
+    pushBytes(0x1b, 0x45, 0x01); // Bold ON
+    pushLine('VOUCHER KUNJUNGAN BERIKUTNYA');
+    pushBytes(0x1b, 0x45, 0x00); // Bold OFF
+    if (msg) {
+      for (const rawLine of msg.split('\n')) {
+        const trimmed = rawLine.trim();
+        if (!trimmed) continue;
+        for (const wrapped of wrapText(trimmed, WIDTH)) {
+          pushLine(wrapped);
+        }
+      }
+    }
+    if (iv.display_format_snapshot === 'QR') {
+      appendEscPosQrCode(chunks, code);
+      pushBytes(0x1b, 0x45, 0x01);
+      pushLine(code);
+      pushBytes(0x1b, 0x45, 0x00);
+    } else if (iv.display_format_snapshot === 'BARCODE') {
+      appendEscPosBarcode128(chunks, code);
+    } else {
+      pushBytes(0x1b, 0x45, 0x01); // Bold ON
+      pushBytes(0x1d, 0x21, 0x01); // Double height
+      pushLine(code);
+      pushBytes(0x1d, 0x21, 0x00); // Normal size
+      pushBytes(0x1b, 0x45, 0x00); // Bold OFF
+    }
+    if (iv.expires_at) {
+      pushLine(`Berlaku s/d ${iv.expires_at.replace('T', ' ')}`);
+    }
+  }
+
   // Feed 4 lines for manual tear bar on Iware X583
   pushBytes(0x1b, 0x64, 0x04);
 
   return new Uint8Array(chunks);
+}
+
+function appendEscPosQrCode(chunks: number[], content: string, moduleSize?: number): void {
+  const data = new TextEncoder().encode(content);
+  if (data.length === 0 || data.length > 700) return;
+  const autoSize =
+    data.length <= 24 ? 10 : data.length <= 48 ? 9 : data.length <= 84 ? 8 : 6;
+  const clampedSize = Math.max(3, Math.min(16, moduleSize ?? autoSize));
+  const storeLen = data.length + 3;
+  const pL = storeLen & 0xff;
+  const pH = (storeLen >> 8) & 0xff;
+
+  chunks.push(0x1b, 0x61, 0x01); // Center align
+  chunks.push(0x0a); // Top quiet zone
+  chunks.push(0x1d, 0x28, 0x6b, 0x04, 0x00, 0x31, 0x41, 0x32, 0x00); // Model 2
+  chunks.push(0x1d, 0x28, 0x6b, 0x03, 0x00, 0x31, 0x43, clampedSize); // Module size
+  chunks.push(0x1d, 0x28, 0x6b, 0x03, 0x00, 0x31, 0x45, 0x30); // EC Level L
+  chunks.push(0x1d, 0x28, 0x6b, pL, pH, 0x31, 0x50, 0x30); // Store data
+  for (const b of data) chunks.push(b);
+  chunks.push(0x1d, 0x28, 0x6b, 0x03, 0x00, 0x31, 0x51, 0x30); // Print QR
+  chunks.push(0x0a, 0x0a); // Bottom quiet zone
+}
+
+function appendEscPosBarcode128(chunks: number[], content: string): void {
+  const ascii = sanitizeAscii(content).trim();
+  if (!ascii || ascii.length > 48) return;
+  const bytes = new TextEncoder().encode(ascii);
+  const totalLen = bytes.length + 2; // "{B" prefix + payload
+
+  chunks.push(0x1b, 0x61, 0x01); // Center align
+  chunks.push(0x0a); // Top quiet zone
+  chunks.push(0x1d, 0x48, 0x02); // HRI text below barcode
+  chunks.push(0x1d, 0x66, 0x01); // Compact HRI font B
+  chunks.push(0x1d, 0x68, 0x44); // Height: 68 dots (~8.5mm)
+  chunks.push(0x1d, 0x77, 0x02); // Width: 2 dots (fits 58mm cleanly)
+  chunks.push(0x1d, 0x6b, 0x49, totalLen, 0x7b, 0x42); // GS k CODE128 Code Set B
+  for (const b of bytes) chunks.push(b);
+  chunks.push(0x0a, 0x0a); // Bottom quiet zone
 }
 
 export function buildEscPosTestPrint58mm(settings?: ReceiptTextConfig | null): Uint8Array {

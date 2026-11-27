@@ -13,6 +13,7 @@ import { api, setUnauthorizedHandler } from './api/client';
 import { PromotionsSection } from './components/PromotionsSection';
 import { ReceiptPrintView } from './components/ReceiptPrintView';
 import { ToastContainer, type ToastMessage } from './components/ToastContainer';
+import { VouchersSection } from './components/VouchersSection';
 import { AdminUsersPage, roleBadge } from './pages/AdminUsersPage';
 import { CashierOrdersPage } from './pages/CashierOrdersPage';
 import { DailyReportPage } from './pages/DailyReportPage';
@@ -51,6 +52,7 @@ export default function App() {
   const [loggingOut, setLoggingOut] = useState(false);
 
   const [activeTab, setActiveTab] = useState<TabKey>('waiter');
+  const [promoSubTab, setPromoSubTab] = useState<'promos' | 'vouchers'>('promos');
   const [printOrder, setPrintOrder] = useState<OrderDetail | null>(null);
   const [refreshSignal, setRefreshSignal] = useState(0);
   const [unpaidCount, setUnpaidCount] = useState(0);
@@ -369,20 +371,50 @@ export default function App() {
           )}
           {activeTab === 'promos' && user.allowed_tabs.includes('promos') && (
             <div className="space-y-4">
-              <div className="flex items-center gap-2">
-                <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-brand-orange/15 text-brand-orange">
-                  <Percent className="h-5 w-5" />
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-2">
+                  <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-brand-orange/15 text-brand-orange">
+                    <Percent className="h-5 w-5" />
+                  </div>
+                  <div>
+                    <h1 className="text-base font-extrabold text-brand-brown sm:text-lg">
+                      Promo &amp; Voucher
+                    </h1>
+                    <p className="text-xs text-brand-brown/70">
+                      Promo diskon langsung sebelum bayar &amp; voucher untuk kunjungan berikutnya
+                    </p>
+                  </div>
                 </div>
-                <div>
-                  <h1 className="text-base font-extrabold text-brand-brown sm:text-lg">
-                    Promo &amp; Diskon
-                  </h1>
-                  <p className="text-xs text-brand-brown/70">
-                    Kelola promo berbasis kuota pelanggan dan Promo Section struk (QR / Barcode)
-                  </p>
+                <div className="inline-flex rounded-xl border border-brand-amber-soft bg-white p-1 shadow-xs">
+                  <button
+                    type="button"
+                    onClick={() => setPromoSubTab('promos')}
+                    className={`h-8 rounded-lg px-3.5 text-xs font-bold transition ${
+                      promoSubTab === 'promos'
+                        ? 'bg-brand-orange text-white shadow-xs'
+                        : 'text-brand-brown/75 hover:bg-brand-cream'
+                    }`}
+                  >
+                    Promo Diskon
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPromoSubTab('vouchers')}
+                    className={`h-8 rounded-lg px-3.5 text-xs font-bold transition ${
+                      promoSubTab === 'vouchers'
+                        ? 'bg-brand-orange text-white shadow-xs'
+                        : 'text-brand-brown/75 hover:bg-brand-cream'
+                    }`}
+                  >
+                    Voucher
+                  </button>
                 </div>
               </div>
-              <PromotionsSection onToast={showToast} />
+              {promoSubTab === 'promos' ? (
+                <PromotionsSection onToast={showToast} />
+              ) : (
+                <VouchersSection onToast={showToast} />
+              )}
             </div>
           )}
           {activeTab === 'expenses' && user.allowed_tabs.includes('expenses') && (
